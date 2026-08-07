@@ -1,0 +1,16 @@
+{
+  "name": "@cloud-harness/agents",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --build",
+    "start:refiner": "node dist/refiner/main.js",
+    "start:implementer": "node dist/implementer/main.js",
+    "start:reviewer": "node dist/reviewer/main.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-sqs": "^3.700.0",
+    "@cloud-harness/shared": "*"
+  }
+}

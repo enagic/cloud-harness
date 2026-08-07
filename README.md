@@ -1,0 +1,207 @@
+# cloud-harness
+
+POC for an autonomous ticket-to-PR pipeline on AWS. Three agents — refiner,
+implementer, code reviewer — move a Jira ticket from rough draft to a reviewed,
+mergeable Bitbucket PR, with a human gate at each end.
+
+```
+  human drafts ticket, adds kickoff label
+              │
+              ▼
+        ┌───────────┐
+        │  REFINER  │  clones repo, enriches ticket with code context
+        └─────┬─────┘
+              ▼
+      ╔═══════════════╗
+      ║ HUMAN GATE 1  ║  approve  ·  or send back with comments ──┐
+      ╚═══════╤═══════╝                                            │
+              │                                       (re-refine) ─┘
+              ▼
+        ┌─────────────┐
+   ┌───▶│ IMPLEMENTER │  clones, implements, pushes PR
+   │    └──────┬──────┘
+   │           ▼
+   │    ┌─────────────┐
+   │    │  REVIEWER   │  checks out branch, reviews, runs tests
+   │    └──────┬──────┘
+   │           │
+   └─ changes ─┤ approved
+     (n of 3)  ▼
+      ╔═══════════════╗
+      ║ HUMAN GATE 2  ║  merge  ·  or send back
+      ╚═══════════════╝
+```
+
+Merge conflicts route back to the implementer for a rebase **without** consuming
+a review attempt. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for why the
+pieces fit together this way.
+
+## Status
+
+**The infrastructure and the workflow logic are done. The agent bodies are not.**
+
+| Component | State |
+|---|---|
+| Terraform — VPC, ECS, 3 queues + DLQs, IAM, ECR, secrets, alarms | Complete |
+| Dispatcher Lambdas (×3) | Complete |
+| **Pipeline state machine** — attempt counter, rebase exemption, gates | Complete, tested (19 tests) |
+| Watcher poll loop, reconciliation, dispatch | Complete |
+| Agent SQS consume loop, visibility heartbeat, retry semantics | Complete |
+| Jira clients (read + write) | **Stub** |
+| Bitbucket clients (read + write) | **Stub** |
+| Refiner / implementer / reviewer bodies | **Stub** |
+| Bedrock model client | **Stub** |
+
+Every stub throws with a `TODO` naming the decisions to settle first. Deploying
+today gives a running skeleton: the watcher polls, the state machine transitions
+tickets, dispatchers scale tasks, queues retry — and each agent fails at its stub.
+
+```bash
+npm test   # the state machine, including the rules that are easy to get wrong
+```
+
+## Layout
+
+```
+infra/                     Terraform. The deployable part.
+  lambda/dispatcher/       Backlog dispatcher (plain .mjs, no build step)
+packages/shared/
+  src/pipeline.ts          The state machine — pure, tested, no I/O
+  src/llm.ts               Provider seam (OpenAI-compatible now, Bedrock later)
+  src/types.ts             Work item contracts between watcher and agents
+services/watcher/          Always-on ECS service, 0.25 vCPU / 512 MB
+services/agents/           One image, three entrypoints
+  src/runtime/consumer.ts  Shared SQS consume loop
+  src/{refiner,implementer,reviewer}/main.ts
+scripts/                   Secret population, image build/push
+```
+
+## Jira workflow
+
+The pipeline drives Jira **status**; humans signal intent with **labels**. Every
+name is configurable in `terraform.tfvars` — these must already exist on the
+board, because Jira resolves transitions by name and a mismatch is a ticket that
+silently never moves.
+
+| Status | Meaning | Set by |
+|---|---|---|
+| `Refining` | Refiner working | Watcher |
+| `Refinement Review` | **Human gate 1** | Refiner |
+| `Ready for Implementation` | Approved | Human |
+| `Implementing` | Implementer working | Watcher |
+| `Code Review` | PR up — triggers reviewer | Implementer |
+| `Reviewing` | Reviewer working | Watcher |
+| `Changes Requested` | Back to implementer (+1 attempt) | Reviewer |
+| `Rebase Required` | Back to implementer (no attempt) | Watcher |
+| `Awaiting Merge` | **Human gate 2**, PR approved | Reviewer |
+| `Done` / `Agent Failed` | Terminal | Watcher |
+
+| Label | Meaning |
+|---|---|
+| `agent-refine` | Human: start the pipeline on this ticket |
+| `agent-changes-requested` | Human: send the refinement back |
+
+`make workflow` prints what the current deployment expects.
+
+Labels are used **only** for signals a human deliberately sends. No pipeline
+state is stored in them — see below.
+
+### The attempt budget is derived, not stored
+
+Nothing writes a counter anywhere. The budget is computed from the Jira
+changelog as *transitions into `Changes Requested` since the last transition
+into `Ready for Implementation`*.
+
+A label or custom field would be editable by anyone with write access to the
+ticket, with no record that it changed. The changelog cannot be edited or
+deleted through Jira's UI or REST API, and every entry is attributed.
+
+Counting the real event also makes two things fall out for free:
+
+- **Rebases cannot consume budget** — they move through a different status, so
+  there is no conditional that a future change could break.
+- **Re-approving at human gate 1 grants a fresh budget**, and that reset is a
+  named account performing a named transition, permanently visible in history.
+
+The same idea covers the PR: it is located in Bitbucket by the
+`agent/<issue-key>-*` branch convention rather than read from a Jira link. Every
+piece of state the pipeline depends on can be rebuilt from Jira's changelog and
+Bitbucket's PR list.
+
+## Model access
+
+Agents talk to a configurable **OpenAI-compatible** `/chat/completions` endpoint
+through the `ChatModel` interface in `packages/shared/src/llm.ts`. Bedrock is the
+intended destination: `BedrockChatModel` is stubbed in the same file, and
+switching is `llm_provider = "bedrock"` + `enable_bedrock_access = true`, which
+grants the agent task roles `bedrock:InvokeModel` and stops creating the API key
+secret. No calling code changes.
+
+Each agent can run a different model via `agents[*].model`.
+
+The watcher makes no model calls at all — it has no model config and no Bedrock
+grant.
+
+## Getting started
+
+```bash
+# 1. Configure — and create the statuses in Jira first
+cp infra/terraform.tfvars.example infra/terraform.tfvars
+$EDITOR infra/terraform.tfvars
+
+# 2. Create the infrastructure (ECR repos must exist before the first push)
+make tf-init
+make apply
+
+# 3. Populate credentials — prompts, nothing echoed or written to tfvars/state
+make secrets
+
+# 4. Build and push images, then roll the watcher
+make images
+make restart-watcher
+```
+
+## Day-to-day
+
+```bash
+make queue-depth          # all three queues + DLQs at a glance
+make logs-watcher         # also logs-refiner, logs-implementer, logs-reviewer
+AGENT=implementer make redrive   # replay one DLQ
+make workflow             # statuses/labels this deployment expects
+make outputs
+```
+
+## Cost
+
+Roughly $75–95/month idle, dominated by the NAT gateway (~$32) and the
+always-on watcher (~$9). Agent tasks bill only while running — the implementer
+at 4 vCPU / 16 GB is about $0.20/hour.
+
+To trim: set `use_fargate_spot = true` per agent (~70% off; SQS redelivery
+already covers interruptions). To harden: `single_nat_gateway = false`.
+
+## Decisions I made that you should sanity-check
+
+These were unspecified and I picked a default rather than blocking:
+
+1. **The attempt budget is derived from the Jira changelog**, not stored — see
+   above. The remaining exposure is that anyone who can transition a ticket into
+   `Ready for Implementation` resets the budget; that is authorised by design and
+   is recorded, but Jira project permissions are the only control on *who* can.
+2. **Statuses drive the machine, labels carry human intent.** Your description
+   mixed both ("adds a label", "code review status"), so I used statuses for the
+   pipeline and labels for the two human signals plus the counter.
+3. **The refined story's structured form is unsolved.** The refiner writes to
+   Jira and the implementer and reviewer need it back out machine-readable. I
+   recommend a fenced JSON block under a known heading; `parseRefinedStory` in
+   `services/watcher/src/work-items.ts` currently returns the raw description.
+4. **Sizing for refiner and reviewer** (1 vCPU/4 GB, 2 vCPU/8 GB) is a guess.
+   Only the implementer's 4 vCPU / 16 GB came from you.
+
+## Known gaps
+
+- **No idempotency store.** Dispatch-once relies on the status transition after
+  enqueue; a crash in between duplicates a dispatch, so agents must tolerate
+  being handed the same item twice.
+- **Polling, not webhooks** — ~60s per hop. Fine for a twice-human-gated flow.
+- **`enable_execute_command` is on** for the watcher, for POC debugging.

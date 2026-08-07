@@ -1,0 +1,133 @@
+# cp terraform.tfvars.example terraform.tfvars and fill in.
+# No secrets here — credentials go into Secrets Manager via scripts/put-secrets.sh.
+
+project_name = "cloud-harness"
+environment  = "poc"
+aws_region   = "us-east-1"
+
+# --- Jira -------------------------------------------------------------------
+
+jira_base_url    = "https://your-org.atlassian.net"
+jira_project_key = "ENG"
+jira_user_email  = "automation@your-org.com"
+
+# The statuses below MUST already exist on the board, with transitions between
+# them permitted for the automation account. Jira resolves transitions by name,
+# so a status that is missing or spelled differently is a ticket that silently
+# never moves. Defaults shown — override to match an existing workflow.
+#
+# jira_statuses = {
+#   refining           = "Refining"
+#   refinement_review  = "Refinement Review"
+#   ready_to_implement = "Ready for Implementation"
+#   implementing       = "Implementing"
+#   code_review        = "Code Review"
+#   reviewing          = "Reviewing"
+#   changes_requested  = "Changes Requested"
+#   rebase_required    = "Rebase Required"
+#   awaiting_merge     = "Awaiting Merge"
+#   done               = "Done"
+#   failed             = "Agent Failed"
+# }
+#
+# Labels are only used for signals a human deliberately sends. No pipeline state
+# is stored in them — the attempt budget is derived from the Jira changelog.
+# jira_labels = {
+#   refine            = "agent-refine"
+#   changes_requested = "agent-changes-requested"
+# }
+
+# Implementation attempts before a ticket is failed for human triage, counted as
+# transitions into the changes_requested status since the last transition into
+# ready_to_implement. Rebases move through a different status and so cannot
+# consume budget. Re-approving a ticket at human gate 1 grants a fresh budget.
+# max_implementation_attempts = 3
+
+# --- Bitbucket --------------------------------------------------------------
+
+bitbucket_workspace      = "your-workspace"
+bitbucket_default_repo   = "your-repo"
+bitbucket_default_branch = "main"
+
+# --- Model access -----------------------------------------------------------
+# POC: OpenAI-compatible endpoint. Populate the llm-api-key secret afterwards.
+
+llm_provider      = "openai_compatible"
+llm_base_url      = "https://your-gateway.internal/v1"
+llm_default_model = "your-model-id"
+
+# Bedrock: flip provider, drop llm_base_url, set Bedrock model ids, and enable
+# the IAM grant. No API key secret is created in this mode.
+#
+# llm_provider          = "bedrock"
+# enable_bedrock_access = true
+# bedrock_region        = "us-east-1"
+# llm_default_model     = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+#
+# Narrow this before prod — the default grants every model in the region.
+# bedrock_allowed_model_arns = [
+#   "arn:aws:bedrock:us-east-1::foundation-model/<model-id>",
+# ]
+
+# --- Agent sizing -----------------------------------------------------------
+# Overriding one agent means supplying the whole map. Defaults are in
+# variables.tf; this block shows the shape and the reasoning behind the sizes.
+#
+# agents = {
+#   # Reads the repo for context and writes prose. No build, no tests.
+#   refiner = {
+#     entrypoint                 = "dist/refiner/main.js"
+#     cpu                        = 1024   # 1 vCPU
+#     memory                     = 4096   # 4 GB
+#     ephemeral_storage_gb       = 30
+#     max_concurrency            = 3
+#     max_items_per_task         = 1
+#     visibility_timeout_seconds = 1800
+#     max_receive_count          = 3
+#     use_fargate_spot           = false
+#     model                      = ""     # empty inherits llm_default_model
+#     reasoning_effort           = ""
+#   }
+#
+#   # The heavy one: clones, builds, tests, iterates.
+#   implementer = {
+#     entrypoint                 = "dist/implementer/main.js"
+#     cpu                        = 4096   # 4 vCPU
+#     memory                     = 16384  # 16 GB
+#     ephemeral_storage_gb       = 50
+#     max_concurrency            = 3
+#     max_items_per_task         = 1
+#     visibility_timeout_seconds = 3600
+#     max_receive_count          = 3
+#     use_fargate_spot           = false
+#     model                      = ""
+#     reasoning_effort           = ""
+#   }
+#
+#   # Checks out and exercises the branch — needs a real build environment.
+#   reviewer = {
+#     entrypoint                 = "dist/reviewer/main.js"
+#     cpu                        = 2048   # 2 vCPU
+#     memory                     = 8192   # 8 GB
+#     ephemeral_storage_gb       = 50
+#     max_concurrency            = 3
+#     max_items_per_task         = 1
+#     visibility_timeout_seconds = 3600
+#     max_receive_count          = 3
+#     use_fargate_spot           = false
+#     model                      = ""
+#     reasoning_effort           = ""
+#   }
+# }
+
+# --- Watcher ----------------------------------------------------------------
+
+# watcher_cpu                   = 256  # 0.25 vCPU
+# watcher_memory                = 512
+# watcher_poll_interval_seconds = 60
+
+# --- Cost / ops -------------------------------------------------------------
+
+# single_nat_gateway = true   # false for prod: one NAT per AZ
+# log_retention_days = 30
+# alarm_email        = "platform-alerts@your-org.com"

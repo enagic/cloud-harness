@@ -1,0 +1,8 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/shared" },
+    { "path": "./services/watcher" },
+    { "path": "./services/agents" }
+  ]
+}
