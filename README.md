@@ -47,6 +47,9 @@ pieces fit together this way.
 | **Pipeline state machine** — attempt counter, rebase exemption, gates | Complete, tested (19 tests) |
 | Watcher poll loop, reconciliation, dispatch | Complete |
 | Agent SQS consume loop, visibility heartbeat, retry semantics | Complete |
+| **Repo manifest** — `.cloud-harness.yml` parsing, stack defaults | Complete, tested |
+| Stack images — base + node / python / jvm Dockerfiles | Complete |
+| Command execution (`runCommand`, `prepareRepo`) with timeout + abort | Complete |
 | Jira clients (read + write) | **Stub** |
 | Bitbucket clients (read + write) | **Stub** |
 | Refiner / implementer / reviewer bodies | **Stub** |
@@ -128,6 +131,49 @@ The same idea covers the PR: it is located in Bitbucket by the
 piece of state the pipeline depends on can be rebuilt from Jira's changelog and
 Bitbucket's PR list.
 
+## Tech stacks and dynamic testing
+
+The implementer verifies its change before pushing; the reviewer runs the suite
+before approving. Both execute the *target repo's* commands, so both need that
+repo's toolchain present in the container.
+
+A repo declares itself in **`.cloud-harness.yml`** at its root — see
+[docs/example-cloud-harness.yml](docs/example-cloud-harness.yml):
+
+```yaml
+stack: node          # selects the image, and therefore the runtimes available
+setupCommand: npm ci
+buildCommand: npm run build
+testCommand: npm test    # without this, the reviewer can only read the diff
+```
+
+The watcher fetches that one file from the Bitbucket API (no clone — it runs on
+0.25 vCPU) and routes the work to the queue for that stack. **The queue is what
+selects the image**: the dispatcher Lambda only ever reads queue depth, never a
+message, so by the time a task launches it is far too late to discover the work
+needed a JDK.
+
+| Stack | Image carries |
+|---|---|
+| `node` | Node 22, corepack (pnpm/yarn), node-gyp toolchain |
+| `python` | Python 3, venv, uv, build-essential |
+| `jvm` | Temurin JDK 21, Maven (Gradle via the repo's wrapper) |
+
+Adding a stack: an entry in the Terraform `stacks` variable, a
+`services/agents/Dockerfile.<name>`, `apply`, `make images`. Each stack adds two
+units (implementer + reviewer), and each unit is a queue, DLQ, task definition,
+Lambda, and alarms — so trim the list to stacks you actually have repos for.
+
+A repo with **no** manifest falls back to `default_stack`. A repo whose manifest
+names an **unknown** stack fails the ticket with a comment listing the valid
+ones — it tried to say something and got it wrong, and running its build in the
+wrong image would produce a baffling review instead of an actionable error.
+
+```bash
+make stacks   # what this deployment can build and test
+make units    # every (agent, stack) unit
+```
+
 ## Model access
 
 Agents talk to a configurable **OpenAI-compatible** `/chat/completions` endpoint
@@ -164,10 +210,13 @@ make restart-watcher
 ## Day-to-day
 
 ```bash
-make queue-depth          # all three queues + DLQs at a glance
-make logs-watcher         # also logs-refiner, logs-implementer, logs-reviewer
-AGENT=implementer make redrive   # replay one DLQ
-make workflow             # statuses/labels this deployment expects
+make queue-depth                    # every unit's queue + DLQ at a glance
+make units                          # list the (agent, stack) units
+make logs-watcher                   # also logs-refiner
+UNIT=implementer-node make logs-agent
+UNIT=implementer-node make redrive  # replay one DLQ
+make stacks                         # stacks this deployment supports
+make workflow                       # statuses/labels this deployment expects
 make outputs
 ```
 

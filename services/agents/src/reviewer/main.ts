@@ -58,12 +58,24 @@ async function handle(ctx: AgentTaskContext<ReviewWorkItem>): Promise<ReviewOutc
       log,
     });
 
+    // The runtime this task launched in was chosen from item.runtime.stack, so
+    // the toolchain for these commands is present. See prepareRepo/runCommand
+    // in ../runtime/exec.ts — that part is implemented.
+    //
     // TODO:
     //  1. Diff the branch against item.repository.baseBranch.
     //  2. Review it against item.refinedDescription / acceptanceCriteria.
-    //  3. Run the repo's tests — "test implementation", not just read it. The
-    //     result goes in ReviewFeedback.verification.
+    //  3. Actually exercise the change:
+    //       await prepareRepo(item.runtime.manifest, { cwd: workdir, log, signal })
+    //       const test = item.runtime.manifest.testCommand
+    //         ? await runCommand(item.runtime.manifest.testCommand, {...})
+    //         : undefined;
+    //     Record it in ReviewFeedback.verification, including `command`. If the
+    //     repo declared no testCommand, report attempted: false rather than
+    //     implying the change was verified — a review that only read the diff
+    //     must say so.
     //  4. Decide: any blocker findings -> changes_requested, else approved.
+    //     A failing test suite is a blocker; an absent one is not, on its own.
     //
     // On changes_requested:
     //     jira.publishReview(...) so the implementer can read the findings back

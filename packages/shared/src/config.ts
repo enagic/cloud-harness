@@ -81,15 +81,69 @@ export function loadPipelineConfig(): PipelineConfig {
 // Queues
 // ---------------------------------------------------------------------------
 
-export type QueueUrls = Record<AgentKind, string>;
+/**
+ * agent -> stack -> queue URL.
+ *
+ * Agents that need a language runtime (implementer, reviewer) have one queue
+ * per stack, because each queue feeds a task definition with a different image.
+ * Agents that do not (refiner) have a single `default` entry.
+ */
+export type QueueUrls = Record<AgentKind, Record<string, string>>;
 
-/** Watcher only: it produces to all three queues. */
+/**
+ * Watcher only: it produces to every queue.
+ *
+ * Passed as one JSON blob rather than a flat env var per queue, because the set
+ * is a product of agents and stacks and grows whenever a stack is added.
+ */
 export function loadQueueUrls(): QueueUrls {
-  return {
-    refiner: requireEnv('REFINER_QUEUE_URL'),
-    implementer: requireEnv('IMPLEMENTER_QUEUE_URL'),
-    reviewer: requireEnv('REVIEWER_QUEUE_URL'),
-  };
+  const raw = requireEnv('AGENT_QUEUE_URLS');
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`AGENT_QUEUE_URLS is not valid JSON: ${(err as Error).message}`);
+  }
+
+  const urls = parsed as Partial<QueueUrls>;
+  for (const agent of ['refiner', 'implementer', 'reviewer'] as const) {
+    const entry = urls[agent];
+    if (entry === undefined || Object.keys(entry).length === 0) {
+      throw new Error(`AGENT_QUEUE_URLS is missing queues for agent: ${agent}`);
+    }
+  }
+
+  return urls as QueueUrls;
+}
+
+/**
+ * Per-stack fallback commands, for repos whose manifest omits them.
+ *
+ * Supplied by the task definition from the Terraform `stacks` variable, so the
+ * conventional command for an ecosystem lives in one place rather than being
+ * copied into every repo's manifest.
+ */
+export type StackDefaults = Record<
+  string,
+  { setupCommand?: string; buildCommand?: string; testCommand?: string; lintCommand?: string }
+>;
+
+export function loadStackDefaults(): StackDefaults {
+  const raw = optionalEnv('STACK_DEFAULTS');
+  if (raw === undefined) return {};
+  try {
+    return JSON.parse(raw) as StackDefaults;
+  } catch (err) {
+    throw new Error(`STACK_DEFAULTS is not valid JSON: ${(err as Error).message}`);
+  }
+}
+
+/** Stacks this deployment has images and queues for. */
+export function loadKnownStacks(): string[] {
+  return requireEnv('KNOWN_STACKS')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 // ---------------------------------------------------------------------------

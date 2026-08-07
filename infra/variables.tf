@@ -93,20 +93,26 @@ variable "agents" {
   description = <<-EOT
     Per-agent sizing and queue behaviour.
 
-    entrypoint  path inside the shared image, selected via the task `command`
+    entrypoint  path inside the agent image, selected via the task `command`
+    needs_runtime  true for agents that execute the repo's build and test
+                   commands. Those get one queue and one task definition PER
+                   STACK, each running that stack's image. Agents that only read
+                   source (the refiner) run on the base image and get a single
+                   queue.
     cpu/memory  Fargate task size; must be a valid Fargate CPU/memory pair
     ephemeral_storage_gb  21-200. Needs room for a clone plus dependencies.
-    max_concurrency       ceiling on simultaneous tasks for this agent
+    max_concurrency       ceiling on simultaneous tasks PER (agent, stack)
     max_items_per_task    work items one task drains before exiting
     visibility_timeout_seconds  floor on how long one item may take; agents also
                                 extend visibility while working
-    max_receive_count     deliveries before the item goes to this agent's DLQ
+    max_receive_count     deliveries before the item goes to its DLQ
     use_fargate_spot      cheaper, interruptible; SQS redelivery covers it
     model / reasoning_effort  per-agent model selection, empty inherits default
   EOT
 
   type = map(object({
     entrypoint                 = string
+    needs_runtime              = bool
     cpu                        = number
     memory                     = number
     ephemeral_storage_gb       = number
@@ -120,9 +126,11 @@ variable "agents" {
   }))
 
   default = {
-    # Reads the repo for context and writes prose. No build, no tests.
+    # Reads the repo for context and writes prose. No build, no tests, so it
+    # runs on the base image and needs no per-stack variants.
     refiner = {
       entrypoint                 = "dist/refiner/main.js"
+      needs_runtime              = false
       cpu                        = 1024
       memory                     = 4096
       ephemeral_storage_gb       = 30
@@ -138,6 +146,7 @@ variable "agents" {
     # The heavy one: clones, builds, tests, iterates.
     implementer = {
       entrypoint                 = "dist/implementer/main.js"
+      needs_runtime              = true
       cpu                        = 4096
       memory                     = 16384
       ephemeral_storage_gb       = 50
@@ -150,10 +159,11 @@ variable "agents" {
       reasoning_effort           = ""
     }
 
-    # Checks out and exercises the branch, so it needs a real build environment
-    # — just not as much headroom as writing the change took.
+    # Checks out and exercises the branch — a review that cannot run the suite
+    # is just a diff read, so this needs a real build environment.
     reviewer = {
       entrypoint                 = "dist/reviewer/main.js"
+      needs_runtime              = true
       cpu                        = 2048
       memory                     = 8192
       ephemeral_storage_gb       = 50
@@ -170,6 +180,89 @@ variable "agents" {
   validation {
     condition     = alltrue([for k in keys(var.agents) : contains(["refiner", "implementer", "reviewer"], k)])
     error_message = "agents keys must be refiner, implementer, or reviewer."
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Tech stacks
+#
+# Each stack is one container image and, for every runtime-needing agent, one
+# queue + task definition + dispatcher. A repo selects its stack in
+# `.cloud-harness.yml`; the watcher reads that file and routes accordingly.
+#
+# Adding a stack: add an entry here, add services/agents/Dockerfile.<key>,
+# apply, then `make images`.
+# ---------------------------------------------------------------------------
+
+variable "stacks" {
+  description = <<-EOT
+    Tech stacks this deployment can build and test.
+
+    dockerfile  path relative to the repo root; must exist before `make images`
+    default_*   fallback commands for repos whose manifest omits them. Explicit
+                manifest values always win — the deployment never overrides what
+                a repo said about itself.
+  EOT
+
+  type = map(object({
+    dockerfile      = string
+    description     = string
+    default_setup   = string
+    default_build   = string
+    default_test    = string
+    default_lint    = string
+  }))
+
+  default = {
+    node = {
+      dockerfile    = "services/agents/Dockerfile.node"
+      description   = "Node 22 + corepack (pnpm/yarn) + node-gyp toolchain"
+      default_setup = "npm ci"
+      default_build = "npm run build --if-present"
+      default_test  = "npm test"
+      default_lint  = "npm run lint --if-present"
+    }
+
+    python = {
+      dockerfile    = "services/agents/Dockerfile.python"
+      description   = "Python 3 + venv + uv + build-essential"
+      default_setup = "uv sync"
+      default_build = ""
+      default_test  = "uv run pytest"
+      default_lint  = "uv run ruff check ."
+    }
+
+    jvm = {
+      dockerfile    = "services/agents/Dockerfile.jvm"
+      description   = "Temurin JDK 21 + Maven (Gradle via repo wrapper)"
+      default_setup = ""
+      default_build = "mvn -B -q compile"
+      default_test  = "mvn -B test"
+      default_lint  = ""
+    }
+  }
+
+  validation {
+    condition     = length(var.stacks) > 0
+    error_message = "At least one stack must be configured."
+  }
+}
+
+variable "default_stack" {
+  description = <<-EOT
+    Stack used for a repo with no .cloud-harness.yml. Must be a key in `stacks`.
+
+    A repo that HAS a manifest naming an unknown stack is failed with a comment
+    rather than silently falling back here — it tried to say something and got
+    it wrong, and running its build in the wrong image produces a confusing
+    review instead of an actionable error.
+  EOT
+  type        = string
+  default     = "node"
+
+  validation {
+    condition     = contains(keys(var.stacks), var.default_stack)
+    error_message = "default_stack must be one of the keys in `stacks`."
   }
 }
 

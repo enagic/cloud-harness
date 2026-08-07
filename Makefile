@@ -6,7 +6,8 @@ ENVIRONMENT  ?= poc
 AWS_REGION   ?= us-east-1
 TAG          ?= latest
 CLUSTER      := $(PROJECT_NAME)-$(ENVIRONMENT)
-AGENTS       := refiner implementer reviewer
+# Read from terraform when available so a new stack needs no Makefile edit.
+UNITS         = $(shell cd infra && terraform output -json agent_queue_urls 2>/dev/null | jq -r 'keys[]' 2>/dev/null)
 
 export PROJECT_NAME ENVIRONMENT AWS_REGION TAG
 
@@ -40,7 +41,7 @@ clean: ## Remove build output
 # --- Images -----------------------------------------------------------------
 
 .PHONY: images
-images: ## Build and push both images to ECR
+images: ## Build and push every image (watcher, agents-base, one per stack)
 	./scripts/build-and-push.sh
 
 .PHONY: image-watcher
@@ -48,8 +49,17 @@ image-watcher: ## Build and push the watcher image only
 	./scripts/build-and-push.sh watcher
 
 .PHONY: image-agents
-image-agents: ## Build and push the shared agents image only
-	./scripts/build-and-push.sh agents
+image-agents: ## Build and push the base + all stack agent images
+	./scripts/build-and-push.sh agents-base $(shell cd infra && terraform output -json stacks 2>/dev/null | jq -r '.known[] | "agents-" + .' 2>/dev/null)
+
+.PHONY: image-stack
+image-stack: ## Build and push one stack image. STACK=python make image-stack
+	@test -n "$(STACK)" || { echo "Set STACK=<name>"; exit 1; }
+	./scripts/build-and-push.sh agents-$(STACK)
+
+.PHONY: stacks
+stacks: ## Show the stacks this deployment can build and test
+	cd infra && terraform output stacks
 
 # --- Infrastructure ---------------------------------------------------------
 
@@ -105,19 +115,20 @@ logs-watcher: ## Tail watcher logs
 logs-refiner: ## Tail refiner logs
 	aws logs tail /ecs/$(CLUSTER)/refiner --follow
 
-.PHONY: logs-implementer
-logs-implementer: ## Tail implementer logs
-	aws logs tail /ecs/$(CLUSTER)/implementer --follow
+.PHONY: logs-agent
+logs-agent: ## Tail one agent unit. UNIT=implementer-node make logs-agent
+	@test -n "$(UNIT)" || { echo "Set UNIT=<agent>-<stack>, e.g. implementer-node. See: make units"; exit 1; }
+	aws logs tail /ecs/$(CLUSTER)/$(UNIT) --follow
 
-.PHONY: logs-reviewer
-logs-reviewer: ## Tail reviewer logs
-	aws logs tail /ecs/$(CLUSTER)/reviewer --follow
+.PHONY: units
+units: ## List every (agent, stack) unit
+	cd infra && terraform output agent_units
 
 .PHONY: queue-depth
-queue-depth: ## Show depth of every queue and DLQ
-	@cd infra && for agent in $(AGENTS); do \
-		main=$$(terraform output -json agent_queue_urls | jq -r ".$$agent"); \
-		dlq=$$(terraform output -json agent_dlq_urls | jq -r ".$$agent"); \
+queue-depth: ## Show depth of every queue and DLQ, per (agent, stack) unit
+	@cd infra && for unit in $(UNITS); do \
+		main=$$(terraform output -json agent_queue_urls | jq -r --arg u "$$unit" '.[$$u]'); \
+		dlq=$$(terraform output -json agent_dlq_urls | jq -r --arg u "$$unit" '.[$$u]'); \
 		visible=$$(aws sqs get-queue-attributes --queue-url "$$main" \
 			--attribute-names ApproximateNumberOfMessages \
 			--query 'Attributes.ApproximateNumberOfMessages' --output text); \
@@ -127,14 +138,14 @@ queue-depth: ## Show depth of every queue and DLQ
 		dead=$$(aws sqs get-queue-attributes --queue-url "$$dlq" \
 			--attribute-names ApproximateNumberOfMessages \
 			--query 'Attributes.ApproximateNumberOfMessages' --output text); \
-		printf '%-14s queued=%-4s in-flight=%-4s dlq=%s\n' "$$agent" "$$visible" "$$inflight" "$$dead"; \
+		printf '%-22s queued=%-4s in-flight=%-4s dlq=%s\n' "$$unit" "$$visible" "$$inflight" "$$dead"; \
 	done
 
 .PHONY: redrive
-redrive: ## Replay one agent's DLQ onto its main queue. AGENT=implementer make redrive
-	@test -n "$(AGENT)" || { echo "Set AGENT=refiner|implementer|reviewer"; exit 1; }
+redrive: ## Replay one unit's DLQ onto its queue. UNIT=implementer-node make redrive
+	@test -n "$(UNIT)" || { echo "Set UNIT=<agent>-<stack>. See: make units"; exit 1; }
 	@cd infra && \
-	dlq=$$(terraform output -json agent_dlq_urls | jq -r ".$(AGENT)") && \
+	dlq=$$(terraform output -json agent_dlq_urls | jq -r --arg u "$(UNIT)" '.[$$u]') && \
 	arn=$$(aws sqs get-queue-attributes --queue-url "$$dlq" \
 		--attribute-names QueueArn --query 'Attributes.QueueArn' --output text) && \
 	aws sqs start-message-move-task --source-arn "$$arn"

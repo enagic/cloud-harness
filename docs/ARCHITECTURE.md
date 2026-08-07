@@ -45,15 +45,17 @@ is automated; neither gate can be bypassed by an agent.
 
 ## Components
 
-| | Shape | Size | Scaling |
-|---|---|---|---|
-| Watcher | Always-on ECS service | 0.25 vCPU / 512 MB | Fixed at 1 |
-| Refiner | Run-to-completion task | 1 vCPU / 4 GB | 0..N by queue depth |
-| Implementer | Run-to-completion task | 4 vCPU / 16 GB | 0..N by queue depth |
-| Reviewer | Run-to-completion task | 2 vCPU / 8 GB | 0..N by queue depth |
-| Dispatchers | Lambda ×3, 1-min schedule | 256 MB | — |
+| | Shape | Size | Image | Scaling |
+|---|---|---|---|---|
+| Watcher | Always-on ECS service | 0.25 vCPU / 512 MB | watcher | Fixed at 1 |
+| Refiner | Run-to-completion task | 1 vCPU / 4 GB | agents-base | 0..N by queue depth |
+| Implementer | Run-to-completion task | 4 vCPU / 16 GB | agents-*&lt;stack&gt;* | 0..N per stack |
+| Reviewer | Run-to-completion task | 2 vCPU / 8 GB | agents-*&lt;stack&gt;* | 0..N per stack |
+| Dispatchers | Lambda per unit, 1-min schedule | 256 MB | — | — |
 
-Each agent has its own SQS queue, DLQ, IAM role, dispatcher, and alarms.
+Each **(agent, stack) unit** has its own queue, DLQ, dispatcher, and alarms; IAM
+roles are per agent. The implementer and reviewer exist once per stack because
+they execute the target repo's build and test commands — see Runtime selection.
 
 ## Why the watcher is separate from the agents
 
@@ -128,15 +130,104 @@ Separate queues also let each agent's IAM role reach exactly one queue. A
 reviewer that could read the implementer queue would be able to claim
 implementation work and stall the pipeline silently.
 
-## Why one image for three agents
+## Runtime selection
+
+The implementer verifies its change before pushing and the reviewer runs the
+suite before approving. Both execute the *target repo's* commands, so both need
+that repo's toolchain — `mvn`, `pytest`, `npm` — actually present in the
+container. A reviewer that cannot run the suite is reduced to reading the diff,
+which is most of the value gone.
+
+Three things had to be decided: where the answer lives, how it reaches the
+right image, and what the images look like.
+
+### Where the answer lives: the repo
+
+`.cloud-harness.yml` at the repo root declares `stack` plus optional setup,
+build, test, and lint commands. In the repo rather than in this deployment's
+Terraform, because the team that owns the code owns the answer, it is reviewed
+in the same PR as the build change it describes, and it is versioned with the
+branch it applies to. Omitted commands fall back to the stack's configured
+defaults; explicit values always win.
+
+The watcher reads it with a **single file fetch** from the Bitbucket API, not a
+clone — it runs on 0.25 vCPU with no git, and pulling a repo to learn which
+runtime it needs would defeat the point of keeping it small.
+
+### How it reaches the right image: the queue
+
+This is the constraint that shapes everything. The dispatcher Lambda **only
+reads queue depth** — it never opens a message, deliberately, so that SQS retry
+semantics stay meaningful (see above). So it cannot look at a work item to
+decide which task definition to launch.
+
+The queue therefore *is* the decision. Runtime-needing agents get one queue per
+stack, each feeding a task definition with that stack's image:
+
+```
+implementer-node    →  agents-node    image  (Node + corepack + node-gyp)
+implementer-python  →  agents-python  image  (Python + venv + uv)
+implementer-jvm     →  agents-jvm     image  (JDK 21 + Maven)
+reviewer-node       →  …
+refiner             →  agents-base    image  (reads source; builds nothing)
+```
+
+The watcher resolves the stack, then routes. With the default three stacks that
+is 1 + 3 + 3 = **seven units**, each a queue, a DLQ, a task definition, a
+dispatcher Lambda, and three alarms. That multiplication is the honest price of
+the depth-only dispatcher. `local.agent_units` computes the product, so adding a
+stack is one Terraform entry plus one Dockerfile.
+
+**A repo naming an unknown stack fails the ticket with a comment listing the
+valid options** rather than falling back to the default. It tried to say
+something and got it wrong; quietly running its Java build in a Node image would
+produce a baffling review instead of an actionable error. A repo with *no*
+manifest does fall back to `default_stack` — saying nothing is different from
+saying something wrong.
+
+### What the images look like
+
+One base image carries the agent code, git, and Node. Stack images are `FROM`
+that base and add only their toolchain, so the TypeScript compile happens once
+rather than once per stack.
+
+**Debian slim, not Alpine.** The agents execute arbitrary test suites from
+target repos, and musl breaks a long tail of native Node addons and most
+manylinux Python wheels. The extra ~40 MB is far cheaper than debugging why a
+repo's suite passes locally and not here.
+
+The per-stack Dockerfiles carry the non-obvious bits: `python3-venv` because
+Debian's PEP 668 marking makes bare `pip install` fail; `build-essential` and
+`python3`/`make`/`g++` for repos with native extensions; warm writable Maven and
+Gradle caches so the first build in every task is not a cold download of the
+whole dependency tree; `MaxRAMPercentage` so a JVM suite sizes its heap against
+the task limit rather than the instance.
+
+### What travels in the event
+
+`RuntimeRef` on every work item — the resolved `stack`, plus the full manifest
+with stack defaults merged in. The agent gets its build and test commands before
+it finishes cloning, and a work item sitting in a DLQ is self-describing: you
+can see what it was trying to do without re-fetching the repo.
+
+`runCommand` / `prepareRepo` in `services/agents/src/runtime/exec.ts` execute
+those commands. That part is implemented — it is mechanical process handling,
+not agent behaviour. It resolves with a non-zero exit code rather than throwing,
+because a failing suite is normal and informative here; it is the reviewer's
+evidence. Output is tail-truncated because it is fed to a model and pasted into
+Jira comments, and a failing suite puts the useful part at the end.
+
+## Why one base image for three agents
 
 The three agents share almost everything: the SQS consume loop, workspace
-management, the Jira and Bitbucket clients, the model seam. Three images would
-be three copies of identical layers and three build pipelines to keep in step.
+management, the Jira and Bitbucket clients, the model seam. Separate images per
+agent would be copies of identical layers and three build pipelines to keep in
+step.
 
 One image, three entrypoints, selected by `command` in each task definition.
 Sizing, concurrency, and IAM still differ per agent because those live in the
-task definition, not the image.
+task definition, not the image — and the stack dimension differs on top of that,
+as above.
 
 ## The attempt budget is derived, not stored
 
@@ -267,6 +358,11 @@ wedged on a hung Jira call as healthy forever.
 
 | Failure | Behaviour |
 |---|---|
+| Repo declares an unknown stack | Ticket → failed with a comment naming the valid stacks |
+| Repo has no manifest | Falls back to `default_stack` |
+| Repo's test command fails | Normal outcome: a blocker finding, not an agent error |
+| Repo declares no test command | Review reports `verification.attempted: false` rather than implying it verified |
+| Test command hangs | `runCommand` timeout (default 15 min), SIGTERM then SIGKILL |
 | Agent crashes / OOM / Spot interrupt | Visibility lapses, redelivered, DLQ after `max_receive_count` |
 | Agent run exceeds visibility timeout | Heartbeat extends it; without one, duplicate work on the same branch |
 | Malformed work item | Left to age into the DLQ rather than deleted — keeps the evidence |

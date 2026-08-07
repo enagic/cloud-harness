@@ -1,0 +1,61 @@
+# Copy this to the ROOT of a target repository as `.cloud-harness.yml`.
+#
+# This file is how a repo tells the pipeline what it is and how to exercise it.
+# It lives in the repo — not in this deployment's Terraform — because the team
+# that owns the code owns the answer, it is reviewed in the same PR as the build
+# change it describes, and it is versioned with the branch it applies to.
+
+# REQUIRED. Selects the container image the implementer and reviewer run in, and
+# therefore which language runtimes exist when your commands execute.
+#
+# Must be one of the stacks this deployment was built with — `make stacks` lists
+# them. A stack this deployment does not have fails the ticket with a comment
+# naming the valid options, rather than silently running your build in the wrong
+# image.
+stack: node
+
+# Everything below is optional. Omitted commands fall back to the stack's
+# defaults (see the `stacks` variable in infra/variables.tf); anything you set
+# here always wins.
+
+# Install dependencies. Runs before build and test.
+setupCommand: npm ci
+
+# Compile / bundle. Omit if the repo has no build step.
+buildCommand: npm run build
+
+# How the reviewer verifies the change actually does what the story asked.
+#
+# Worth setting even if it is slow. Without it the reviewer can read the diff
+# but cannot execute it, and it will report `verification.attempted: false` —
+# an honest but much weaker review. This is the single highest-value line in
+# the file.
+testCommand: npm test
+
+lintCommand: npm run lint
+
+# Advisory only. Signals paths the agents should leave alone; nothing enforces
+# it, so do not treat this as a security control. Use branch permissions and
+# required reviewers for anything that actually matters.
+protectedPaths:
+  - infra/
+  - migrations/
+
+# ---------------------------------------------------------------------------
+# Other stacks, for reference
+# ---------------------------------------------------------------------------
+#
+# stack: python
+# setupCommand: uv sync
+# testCommand: uv run pytest -x
+# lintCommand: uv run ruff check .
+#
+# stack: jvm
+# buildCommand: ./gradlew assemble
+# testCommand: ./gradlew test
+#
+# A repo that follows its ecosystem's conventions can get away with just:
+#
+#   stack: python
+#
+# and inherit the rest from the stack defaults.

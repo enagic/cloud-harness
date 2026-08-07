@@ -1,0 +1,32 @@
+# Node/TypeScript stack image.
+#
+# Built FROM the base image, which already carries the agent code, git, and a
+# Node 22 runtime. This layer adds the package managers a target repo might
+# expect, since the agent runs the repo's own commands verbatim.
+#
+#   docker build -f services/agents/Dockerfile.node \
+#     --build-arg BASE_IMAGE=agents-base:local -t agents-node:local .
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+USER root
+
+# corepack ships with Node and pins pnpm/yarn per-repo from packageManager in
+# package.json, which is what a repo that uses them will expect. Enabling it
+# here means the agent does not have to guess or install anything at run time.
+RUN corepack enable
+
+# Build toolchain for repos with native addons (node-gyp). Without this, an
+# `npm ci` on anything using bcrypt, sharp, better-sqlite3, or similar fails
+# with a compiler error that looks nothing like a dependency problem.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      python3 \
+      make \
+      g++ \
+ && rm -rf /var/lib/apt/lists/*
+
+USER node
+
+ENV CLOUD_HARNESS_STACK=node

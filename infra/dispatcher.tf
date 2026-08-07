@@ -1,4 +1,5 @@
-# One dispatcher Lambda per agent. Turns queue depth into running tasks.
+# One dispatcher Lambda per (agent, stack) unit. Turns queue depth into running
+# tasks.
 #
 # A Lambda SQS event-source mapping would delete each message on successful
 # *invocation*, which here means "the task was launched", not "the work was
@@ -6,8 +7,10 @@
 # depth and letting the task own its own message keeps SQS retry semantics
 # meaningful end to end. See docs/ARCHITECTURE.md.
 #
-# Three Lambdas rather than one loop over three queues: each gets its own
-# concurrency ceiling, its own error alarm, and its own blast radius.
+# That choice is also why the stack has to be baked into the queue: this Lambda
+# never opens a message, so it cannot look at one to decide which task
+# definition to launch. Its queue *is* the decision. One Lambda per unit also
+# gives each its own concurrency ceiling, error alarm, and blast radius.
 
 data "archive_file" "dispatcher" {
   type        = "zip"
@@ -28,25 +31,26 @@ data "aws_iam_policy_document" "lambda_assume" {
 }
 
 resource "aws_cloudwatch_log_group" "dispatcher" {
-  for_each = var.agents
+  for_each = local.agent_units
 
-  name              = "/aws/lambda/${local.name_prefix}-${each.key}-dispatcher"
+  name              = "/aws/lambda/${local.name_prefix}-${each.value.suffix}-dispatcher"
   retention_in_days = var.log_retention_days
 }
 
 resource "aws_iam_role" "dispatcher" {
-  for_each = var.agents
+  for_each = local.agent_units
 
-  name               = "${local.name_prefix}-${each.key}-dispatcher"
+  name               = "${local.name_prefix}-${each.value.suffix}-dispatcher"
   assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
 
   tags = {
-    Agent = each.key
+    Agent = each.value.agent
+    Stack = each.value.stack
   }
 }
 
 data "aws_iam_policy_document" "dispatcher" {
-  for_each = var.agents
+  for_each = local.agent_units
 
   statement {
     sid       = "Logs"
@@ -99,7 +103,7 @@ data "aws_iam_policy_document" "dispatcher" {
     actions = ["iam:PassRole"]
     resources = [
       aws_iam_role.task_execution.arn,
-      aws_iam_role.agent_task[each.key].arn,
+      aws_iam_role.agent_task[each.value.agent].arn,
     ]
 
     condition {
@@ -111,7 +115,7 @@ data "aws_iam_policy_document" "dispatcher" {
 }
 
 resource "aws_iam_role_policy" "dispatcher" {
-  for_each = var.agents
+  for_each = local.agent_units
 
   name   = "dispatcher"
   role   = aws_iam_role.dispatcher[each.key].id
@@ -119,9 +123,9 @@ resource "aws_iam_role_policy" "dispatcher" {
 }
 
 resource "aws_lambda_function" "dispatcher" {
-  for_each = var.agents
+  for_each = local.agent_units
 
-  function_name = "${local.name_prefix}-${each.key}-dispatcher"
+  function_name = "${local.name_prefix}-${each.value.suffix}-dispatcher"
   role          = aws_iam_role.dispatcher[each.key].arn
   handler       = "index.handler"
   runtime       = "nodejs22.x"
@@ -134,15 +138,16 @@ resource "aws_lambda_function" "dispatcher" {
 
   environment {
     variables = {
-      AGENT_KIND         = each.key
+      AGENT_KIND         = each.value.agent
+      STACK              = each.value.stack
       QUEUE_URL          = aws_sqs_queue.agent[each.key].id
       CLUSTER_ARN        = aws_ecs_cluster.main.arn
       TASK_DEFINITION    = aws_ecs_task_definition.agent[each.key].arn
       TASK_FAMILY        = aws_ecs_task_definition.agent[each.key].family
       SUBNET_IDS         = join(",", aws_subnet.private[*].id)
       SECURITY_GROUP_IDS = aws_security_group.workloads.id
-      MAX_CONCURRENCY    = tostring(each.value.max_concurrency)
-      CAPACITY_PROVIDER  = each.value.use_fargate_spot ? "FARGATE_SPOT" : "FARGATE"
+      MAX_CONCURRENCY    = tostring(each.value.cfg.max_concurrency)
+      CAPACITY_PROVIDER  = each.value.cfg.use_fargate_spot ? "FARGATE_SPOT" : "FARGATE"
     }
   }
 
@@ -152,8 +157,9 @@ resource "aws_lambda_function" "dispatcher" {
   ]
 
   tags = {
-    Name  = "${local.name_prefix}-${each.key}-dispatcher"
-    Agent = each.key
+    Name  = "${local.name_prefix}-${each.value.suffix}-dispatcher"
+    Agent = each.value.agent
+    Stack = each.value.stack
   }
 }
 
@@ -162,15 +168,15 @@ resource "aws_lambda_function" "dispatcher" {
 # budget for a pipeline gated on human review twice.
 
 resource "aws_cloudwatch_event_rule" "dispatcher" {
-  for_each = var.agents
+  for_each = local.agent_units
 
-  name                = "${local.name_prefix}-${each.key}-dispatcher"
-  description         = "Poll ${each.key} queue depth and launch tasks"
+  name                = "${local.name_prefix}-${each.value.suffix}-dispatcher"
+  description         = "Poll ${each.value.suffix} queue depth and launch tasks"
   schedule_expression = "rate(1 minute)"
 }
 
 resource "aws_cloudwatch_event_target" "dispatcher" {
-  for_each = var.agents
+  for_each = local.agent_units
 
   rule      = aws_cloudwatch_event_rule.dispatcher[each.key].name
   target_id = "dispatcher"
@@ -178,7 +184,7 @@ resource "aws_cloudwatch_event_target" "dispatcher" {
 }
 
 resource "aws_lambda_permission" "dispatcher_events" {
-  for_each = var.agents
+  for_each = local.agent_units
 
   statement_id  = "AllowExecutionFromEventBridge"
   action        = "lambda:InvokeFunction"
@@ -188,10 +194,10 @@ resource "aws_lambda_permission" "dispatcher_events" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "dispatcher_errors" {
-  for_each = var.agents
+  for_each = local.agent_units
 
-  alarm_name          = "${local.name_prefix}-${each.key}-dispatcher-errors"
-  alarm_description   = "The ${each.key} dispatcher is failing; queued work will not start."
+  alarm_name          = "${local.name_prefix}-${each.value.suffix}-dispatcher-errors"
+  alarm_description   = "The ${each.value.suffix} dispatcher is failing; queued work will not start."
   namespace           = "AWS/Lambda"
   metric_name         = "Errors"
   statistic           = "Sum"

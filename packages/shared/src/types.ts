@@ -8,6 +8,8 @@
  * agent.
  */
 
+import type { RepoManifest } from './manifest.js';
+
 export const WORK_ITEM_SCHEMA_VERSION = 1 as const;
 
 /** Which agent a work item is destined for. */
@@ -18,6 +20,29 @@ export interface RepositoryRef {
   workspace: string;
   slug: string;
   baseBranch: string;
+}
+
+/**
+ * How to build and test the repo, and therefore which container image the work
+ * item must run in.
+ *
+ * `stack` is resolved by the watcher before dispatch, from the repo's
+ * `.cloud-harness.yml`. It is not merely informational: it selects the queue,
+ * and each queue feeds a task definition whose image carries that stack's
+ * language runtimes. An implementer that cannot run `mvn test` cannot verify a
+ * Java change, and a reviewer that cannot run the suite is reduced to reading
+ * the diff.
+ *
+ * The manifest is echoed into the event so agents have the build and test
+ * commands before they finish cloning, and so a work item is self-describing in
+ * the DLQ — you can see what a failed item was trying to do without re-fetching
+ * the repo.
+ */
+export interface RuntimeRef {
+  /** Key into the deployment's configured stacks. Selects queue and image. */
+  stack: string;
+  /** Resolved manifest: repo values, with stack defaults filled in. */
+  manifest: RepoManifest;
 }
 
 interface WorkItemBase {
@@ -31,6 +56,7 @@ interface WorkItemBase {
   title: string;
 
   repository: RepositoryRef;
+  runtime: RuntimeRef;
 
   /** ISO 8601. When the watcher dispatched this item. */
   dispatchedAt: string;
@@ -135,10 +161,19 @@ export interface ReviewFinding {
 export interface ReviewFeedback {
   summary: string;
   findings: ReviewFinding[];
-  /** Whether the reviewer ran the repo's tests, and what happened. */
+  /**
+   * Whether the reviewer actually executed the change, and what happened.
+   *
+   * `attempted: false` is a meaningful and expected outcome — it means the repo
+   * declared no testCommand, or the runtime could not run it. A review that
+   * only read the diff should say so rather than implying it verified anything.
+   */
   verification: {
     attempted: boolean;
+    /** The command run, echoed so the implementer can reproduce it. */
+    command?: string;
     passed?: boolean;
+    /** Truncated stdout/stderr. Keep it small; this rides in a Jira comment. */
     output?: string;
   };
 }

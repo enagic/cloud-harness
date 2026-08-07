@@ -1,0 +1,40 @@
+# JVM stack image (Java / Kotlin).
+#
+#   docker build -f services/agents/Dockerfile.jvm \
+#     --build-arg BASE_IMAGE=agents-base:local -t agents-jvm:local .
+#
+# The largest of the stack images by a wide margin (~450 MB added). That is the
+# real cost of the per-stack split: a single fat image carrying every runtime
+# would push this onto every task, including refiners that never compile
+# anything.
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+USER root
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      openjdk-21-jdk-headless \
+      maven \
+ && rm -rf /var/lib/apt/lists/*
+
+ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-arm64
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
+
+# Most repos ship a Gradle wrapper (./gradlew) and should use it — a pinned
+# wrapper is the whole point. No system Gradle is installed; if a repo needs one
+# it should say so, and that is a signal worth seeing rather than papering over.
+
+# Warm, writable Maven and Gradle caches. Without these the first build in every
+# task runs as a cold download of the entire dependency tree, which on a 4 vCPU
+# task is minutes of wall clock charged to the attempt.
+RUN mkdir -p /home/node/.m2 /home/node/.gradle \
+ && chown -R node:node /home/node/.m2 /home/node/.gradle
+
+USER node
+
+ENV CLOUD_HARNESS_STACK=jvm
+# Containers report host CPU/memory to older JVMs; this keeps a test suite from
+# sizing its heap against the instance rather than the task limit.
+ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75.0"

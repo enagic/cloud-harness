@@ -111,8 +111,13 @@ resource "aws_iam_role" "agent_task" {
 data "aws_iam_policy_document" "agent_task" {
   for_each = var.agents
 
+  # Every queue belonging to this agent, across all its stacks. One role per
+  # agent rather than per (agent, stack): the stack images run identical code
+  # with identical trust, so splitting further would add roles without adding
+  # isolation. The agent-level boundary is the one that matters — it stops a
+  # reviewer from claiming implementation work.
   statement {
-    sid    = "ConsumeOwnQueue"
+    sid    = "ConsumeOwnQueues"
     effect = "Allow"
     actions = [
       "sqs:ReceiveMessage",
@@ -121,7 +126,10 @@ data "aws_iam_policy_document" "agent_task" {
       "sqs:GetQueueAttributes",
       "sqs:GetQueueUrl",
     ]
-    resources = [aws_sqs_queue.agent[each.key].arn]
+    resources = [
+      for key, unit in local.agent_units :
+      aws_sqs_queue.agent[key].arn if unit.agent == each.key
+    ]
   }
 }
 

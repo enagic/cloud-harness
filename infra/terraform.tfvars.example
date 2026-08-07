@@ -49,6 +49,37 @@ bitbucket_workspace      = "your-workspace"
 bitbucket_default_repo   = "your-repo"
 bitbucket_default_branch = "main"
 
+# --- Tech stacks ------------------------------------------------------------
+# Each stack is one container image carrying that ecosystem's toolchain, plus a
+# queue + task definition + dispatcher for every runtime-needing agent. The
+# implementer and reviewer must be able to run the repo's build and test
+# commands, so the image is chosen at dispatch time from the repo's
+# .cloud-harness.yml (see docs/example-cloud-harness.yml).
+#
+# Adding a stack: add an entry here, add services/agents/Dockerfile.<key>,
+# apply, then `make images`. Removing one destroys its queues — drain them first.
+#
+# Defaults are node, python, and jvm; see variables.tf for the full shape.
+# Trim the list to what you actually have repos for: each stack adds two units
+# (implementer + reviewer), and each unit is a queue, a DLQ, a task definition,
+# a Lambda, and three alarms.
+#
+# stacks = {
+#   node = {
+#     dockerfile    = "services/agents/Dockerfile.node"
+#     description   = "Node 22 + corepack + node-gyp toolchain"
+#     default_setup = "npm ci"
+#     default_build = "npm run build --if-present"
+#     default_test  = "npm test"
+#     default_lint  = "npm run lint --if-present"
+#   }
+# }
+
+# Used for repos with no .cloud-harness.yml. Must be a key in `stacks`.
+# A repo whose manifest names an UNKNOWN stack is failed with a comment instead
+# of falling back here.
+# default_stack = "node"
+
 # --- Model access -----------------------------------------------------------
 # POC: OpenAI-compatible endpoint. Populate the llm-api-key secret afterwards.
 

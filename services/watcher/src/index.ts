@@ -27,10 +27,13 @@ import {
   intEnv,
   loadBitbucketConfig,
   loadJiraConfig,
+  loadKnownStacks,
   loadPipelineConfig,
   loadQueueUrls,
+  loadStackDefaults,
   needsHistory,
   reconcilePullRequest,
+  requireEnv,
   type PipelineConfig,
   type RepositoryRef,
   type StatusIds,
@@ -41,6 +44,7 @@ import { BitbucketReader } from './bitbucket.js';
 import { recordHeartbeat } from './health.js';
 import { JiraClient } from './jira.js';
 import { WorkQueues } from './queues.js';
+import { resolveRuntime, type RuntimeResolverOptions } from './runtime.js';
 import { buildWorkItem } from './work-items.js';
 
 const log = createLogger({ service: 'watcher' });
@@ -52,6 +56,7 @@ interface Deps {
   config: PipelineConfig;
   statusIds: StatusIds;
   repository: RepositoryRef;
+  runtimeOptions: RuntimeResolverOptions;
 }
 
 /**
@@ -138,9 +143,30 @@ async function tick(deps: Deps): Promise<void> {
         continue;
       }
 
+      // Resolve the runtime before building the item: the stack selects the
+      // queue, and the queue selects the image the agent runs in. A repo whose
+      // manifest names a stack this deployment cannot run must fail here with a
+      // message on the board, not by dispatching into a queue that does not
+      // exist or, worse, running a Java build in a Node image.
+      const runtime = await resolveRuntime(
+        deps.repository,
+        deps.bitbucket,
+        deps.runtimeOptions,
+        ticketLog,
+      );
+      if (!runtime.ok) {
+        await deps.jira.applyMutation(ticket.issueKey, {
+          status: deps.config.statuses.failed,
+          comment: `Cannot determine how to build this repository: ${runtime.error}`,
+        });
+        ticketLog.error('runtime resolution failed', { error: runtime.error });
+        continue;
+      }
+
       const item = buildWorkItem(action, {
         ticket,
         repository: deps.repository,
+        runtime: runtime.runtime,
         maxAttempts: deps.config.maxAttempts,
       });
       if (item === undefined) {
@@ -160,6 +186,8 @@ async function tick(deps: Deps): Promise<void> {
 
       ticketLog.info('dispatched', {
         agent: item.agent,
+        stack: item.runtime.stack,
+        stackSource: runtime.source,
         from: ticket.status,
         to: action.mutation.status,
         attempts: ticket.attempts,
@@ -190,17 +218,26 @@ async function main(): Promise<void> {
     baseBranch: bitbucketConfig.defaultBranch,
   };
 
+  const knownStacks = loadKnownStacks();
+  const runtimeOptions: RuntimeResolverOptions = {
+    knownStacks,
+    defaultStack: requireEnv('DEFAULT_STACK'),
+    stackDefaults: loadStackDefaults(),
+  };
+
   // Resolved once, at startup. Fails fast and loudly if the board is missing a
   // configured status, rather than one ticket at a time in production.
   const statusIds = await jira.resolveStatusIds();
 
-  const deps: Deps = { jira, bitbucket, queues, config, statusIds, repository };
+  const deps: Deps = { jira, bitbucket, queues, config, statusIds, repository, runtimeOptions };
 
   log.info('watcher starting', {
     project: jiraConfig.projectKey,
     pollIntervalMs,
     maxAttempts: config.maxAttempts,
     repository: `${repository.workspace}/${repository.slug}`,
+    knownStacks,
+    defaultStack: runtimeOptions.defaultStack,
   });
 
   let stopping = false;

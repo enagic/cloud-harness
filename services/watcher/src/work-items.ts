@@ -12,6 +12,7 @@ import {
   type RefineWorkItem,
   type RepositoryRef,
   type ReviewWorkItem,
+  type RuntimeRef,
   type TicketSnapshot,
   type WorkItem,
 } from '@cloud-harness/shared';
@@ -19,6 +20,7 @@ import {
 export interface WorkItemContext {
   ticket: TicketSnapshot;
   repository: RepositoryRef;
+  runtime: RuntimeRef;
   maxAttempts: number;
 }
 
@@ -52,7 +54,7 @@ export function buildWorkItem(
   action: PipelineAction,
   ctx: WorkItemContext,
 ): WorkItem | undefined {
-  const { ticket, repository, maxAttempts } = ctx;
+  const { ticket, repository, runtime, maxAttempts } = ctx;
 
   const base = {
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,
@@ -60,6 +62,7 @@ export function buildWorkItem(
     issueId: ticket.issueId,
     title: ticket.summary,
     repository,
+    runtime,
     dispatchedAt: new Date().toISOString(),
   } as const;
 

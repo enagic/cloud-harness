@@ -38,6 +38,25 @@ export class BitbucketReader {
   }
 
   /**
+   * Fetch the raw `.cloud-harness.yml` from the repo's base branch.
+   *
+   * A single file read, not a clone — the watcher runs on 0.25 vCPU with no git
+   * and no working directory, and pulling a repo just to learn which runtime it
+   * needs would defeat the point of keeping it small.
+   *
+   * TODO: GET /2.0/repositories/{workspace}/{repo}/src/{branch}/{path}
+   * Try each name in MANIFEST_FILENAMES in order. Return undefined on 404 —
+   * a repo with no manifest is a normal case, handled by the configured
+   * default stack, not an error.
+   *
+   * Worth caching per (repo, branch) with a short TTL: this is called for every
+   * pipeline ticket on every tick, and the answer changes about once a year.
+   */
+  async readManifest(_repo: RepositoryRef): Promise<string | undefined> {
+    throw new Error('BitbucketReader.readManifest not implemented');
+  }
+
+  /**
    * TODO: GET /2.0/repositories/{workspace}/{repo}/pullrequests/{id}
    *
    * Mergeability is the subtle part. The PR object's own fields do not reliably

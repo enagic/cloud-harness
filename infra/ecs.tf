@@ -27,13 +27,6 @@ resource "aws_cloudwatch_log_group" "watcher" {
   retention_in_days = var.log_retention_days
 }
 
-resource "aws_cloudwatch_log_group" "agent" {
-  for_each = var.agents
-
-  name              = "/ecs/${local.name_prefix}/${each.key}"
-  retention_in_days = var.log_retention_days
-}
-
 # ---------------------------------------------------------------------------
 # Shared container config
 # ---------------------------------------------------------------------------
@@ -126,9 +119,17 @@ resource "aws_ecs_task_definition" "watcher" {
 
       environment = concat(local.common_env, [
         { name = "POLL_INTERVAL_SECONDS", value = tostring(var.watcher_poll_interval_seconds) },
-        { name = "REFINER_QUEUE_URL", value = aws_sqs_queue.agent["refiner"].id },
-        { name = "IMPLEMENTER_QUEUE_URL", value = aws_sqs_queue.agent["implementer"].id },
-        { name = "REVIEWER_QUEUE_URL", value = aws_sqs_queue.agent["reviewer"].id },
+
+        # agent -> stack -> queue URL. One blob rather than an env var per
+        # queue, because the set is a product of agents and stacks.
+        { name = "AGENT_QUEUE_URLS", value = jsonencode(local.agent_queue_urls) },
+
+        # Runtime selection. The watcher reads each repo's .cloud-harness.yml,
+        # validates the stack against this list, and routes to the matching
+        # queue — which is what picks the image the agent runs in.
+        { name = "KNOWN_STACKS", value = join(",", keys(var.stacks)) },
+        { name = "DEFAULT_STACK", value = var.default_stack },
+        { name = "STACK_DEFAULTS", value = jsonencode(local.stack_defaults) },
       ])
 
       secrets = local.jira_bitbucket_secrets

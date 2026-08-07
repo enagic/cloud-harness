@@ -89,7 +89,13 @@ async function handle(ctx: AgentTaskContext<ImplementWorkItem>): Promise<Impleme
         //  1. Create `branch` off item.repository.baseBranch.
         //  2. Implement against item.refinedDescription and
         //     item.acceptanceCriteria, starting from item.relevantPaths.
-        //  3. Verify (build + tests) before pushing.
+        //  3. Verify before pushing, using the repo's own commands — this task
+        //     is running in the stack image selected by item.runtime.stack, so
+        //     the toolchain is present:
+        //       await prepareRepo(item.runtime.manifest, { cwd: workdir, log, signal })
+        //       await runCommand(item.runtime.manifest.testCommand, {...})
+        //     Pushing a branch whose suite fails wastes a full review round
+        //     trip, and the budget is only three.
         //  4. bitbucket.pushBranch, bitbucket.openPullRequest
         //  5. jira.linkPullRequest so the watcher and reviewer can find it.
         //  6. jira.applyMutation({ status: pipeline.statuses.codeReview })

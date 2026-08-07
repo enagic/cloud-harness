@@ -4,8 +4,19 @@ output "aws_region" {
 }
 
 output "ecr_repository_urls" {
-  description = "Push targets. Two repos: the watcher, and one shared agents image."
+  description = "Push targets: the watcher, the base agent image, and one per stack."
   value       = { for k, v in aws_ecr_repository.this : k => v.repository_url }
+}
+
+output "stacks" {
+  description = <<-EOT
+    Tech stacks this deployment can build and test. A repo selects one in its
+    .cloud-harness.yml; anything else is failed with a comment on the ticket.
+  EOT
+  value = {
+    known   = keys(var.stacks)
+    default = var.default_stack
+  }
 }
 
 output "ecs_cluster_name" {
@@ -18,23 +29,37 @@ output "watcher_service_name" {
   value       = aws_ecs_service.watcher.name
 }
 
+output "agent_units" {
+  description = <<-EOT
+    Every (agent, stack) unit, keyed as "<agent>" or "<agent>-<stack>". Agents
+    that execute repo commands have one unit per stack; the refiner has one.
+  EOT
+  value = {
+    for k, v in local.agent_units : k => {
+      agent = v.agent
+      stack = v.stack
+      image = v.image_repo
+    }
+  }
+}
+
 output "agent_task_families" {
-  description = "Task definition family per agent."
+  description = "Task definition family per unit."
   value       = { for k, v in aws_ecs_task_definition.agent : k => v.family }
 }
 
 output "agent_queue_urls" {
-  description = "Work queue URL per agent."
+  description = "Work queue URL per unit."
   value       = { for k, v in aws_sqs_queue.agent : k => v.id }
 }
 
 output "agent_dlq_urls" {
-  description = "Dead letter queue per agent. Items here exhausted their retries."
+  description = "Dead letter queue per unit. Items here exhausted their retries."
   value       = { for k, v in aws_sqs_queue.agent_dlq : k => v.id }
 }
 
 output "dispatcher_function_names" {
-  description = "Backlog dispatcher Lambda per agent."
+  description = "Backlog dispatcher Lambda per unit."
   value       = { for k, v in aws_lambda_function.dispatcher : k => v.function_name }
 }
 
@@ -54,6 +79,17 @@ output "log_groups" {
     { watcher = aws_cloudwatch_log_group.watcher.name },
     { for k, v in aws_cloudwatch_log_group.agent : k => v.name },
     { for k, v in aws_cloudwatch_log_group.dispatcher : "${k}-dispatcher" => v.name },
+  )
+}
+
+output "agent_image_builds" {
+  description = <<-EOT
+    Dockerfile per agent image, for scripts/build-and-push.sh. The base image
+    must be built first — the stack images are FROM it.
+  EOT
+  value = merge(
+    { agents-base = "services/agents/Dockerfile.base" },
+    { for name, cfg in var.stacks : "agents-${name}" => cfg.dockerfile },
   )
 }
 

@@ -1,14 +1,10 @@
-# Two repositories, not four. The three agents ship as one image with three
-# entrypoints — they share their clone/model/Jira machinery, so separate images
-# would be three copies of identical layers and three build pipelines to keep in
-# step. The task definitions select the agent via `command`.
-
-locals {
-  ecr_repos = {
-    watcher = "${local.name_prefix}/watcher"
-    agents  = "${local.name_prefix}/agents"
-  }
-}
+# One repo for the watcher, one for the base agent image, and one per stack.
+#
+# The three agents share their code, so they share a base image; what differs
+# between stack images is only the language toolchain layered on top. The refiner
+# runs the base image directly since it never builds anything.
+#
+# See local.ecr_repos in locals.tf.
 
 resource "aws_ecr_repository" "this" {
   for_each = local.ecr_repos

@@ -1,5 +1,6 @@
 terraform {
-  required_version = ">= 1.6.0"
+  # 1.9 for cross-variable validation (default_stack must be a key in stacks).
+  required_version = ">= 1.9.0"
 
   required_providers {
     aws = {
