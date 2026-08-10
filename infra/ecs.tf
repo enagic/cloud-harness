@@ -71,14 +71,43 @@ locals {
 
   # Injected by the ECS agent at task start, resolved through the execution
   # role. Values never appear in the task definition.
-  jira_bitbucket_secrets = [
+  jira_secrets = [
     {
       name      = "JIRA_API_TOKEN"
       valueFrom = aws_secretsmanager_secret.this["jira_api_token"].arn
     },
+  ]
+
+  # Bitbucket credentials, per identity. The execution role can read all three
+  # because it is what performs the injection, but each CONTAINER receives only
+  # its own — so a compromised implementer holds no credential that can approve
+  # its own pull request. That containment is the point of the split.
+  bitbucket_secret_for = {
+    read        = aws_secretsmanager_secret.this["bitbucket_token_read"].arn
+    implementer = aws_secretsmanager_secret.this["bitbucket_token_implementer"].arn
+    reviewer    = aws_secretsmanager_secret.this["bitbucket_token_reviewer"].arn
+  }
+
+  # Agent kind -> which identity it acts as. Mirrors bitbucketRoleFor() in
+  # packages/shared/src/config.ts; the two must agree.
+  bitbucket_role_for_agent = {
+    refiner     = "read"
+    implementer = "implementer"
+    reviewer    = "reviewer"
+  }
+
+  # Identity -> the env var its token is injected as. Mirrors
+  # BITBUCKET_TOKEN_ENV in packages/shared/src/config.ts.
+  bitbucket_env_for_role = {
+    read        = "BITBUCKET_TOKEN"
+    implementer = "BITBUCKET_IMPLEMENTER_TOKEN"
+    reviewer    = "BITBUCKET_REVIEWER_TOKEN"
+  }
+
+  watcher_bitbucket_secrets = [
     {
       name      = "BITBUCKET_TOKEN"
-      valueFrom = aws_secretsmanager_secret.this["bitbucket_token"].arn
+      valueFrom = local.bitbucket_secret_for["read"]
     },
   ]
 
@@ -132,7 +161,7 @@ resource "aws_ecs_task_definition" "watcher" {
         { name = "STACK_DEFAULTS", value = jsonencode(local.stack_defaults) },
       ])
 
-      secrets = local.jira_bitbucket_secrets
+      secrets = concat(local.jira_secrets, local.watcher_bitbucket_secrets)
 
       logConfiguration = {
         logDriver = "awslogs"

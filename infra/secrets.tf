@@ -14,9 +14,27 @@ locals {
         name        = "${local.name_prefix}/jira-api-token"
         description = "Jira Cloud API token for ${var.jira_user_email}"
       }
-      bitbucket_token = {
-        name        = "${local.name_prefix}/bitbucket-token"
-        description = "Bitbucket app password or access token used to push branches and open PRs"
+      # One Bitbucket credential per identity, not one per deployment.
+      #
+      # The implementer and the reviewer must be separate service accounts:
+      # Bitbucket does not count an approval from a pull request's own author
+      # towards a minimum-approval merge check, so a shared identity yields a
+      # reviewer whose approve call returns 200 while the PR stays unmergeable.
+      #
+      # In a sandbox the same value can be written to all three. The split is
+      # structural so that making them different in production is a change of
+      # secret values, not a change of shape.
+      bitbucket_token_read = {
+        name        = "${local.name_prefix}/bitbucket-token-read"
+        description = "Bitbucket read-only token — watcher polling and refiner repo reads"
+      }
+      bitbucket_token_implementer = {
+        name        = "${local.name_prefix}/bitbucket-token-implementer"
+        description = "Bitbucket token for the implementer service account — pushes branches, opens PRs"
+      }
+      bitbucket_token_reviewer = {
+        name        = "${local.name_prefix}/bitbucket-token-reviewer"
+        description = "Bitbucket token for the reviewer service account — comments and approves. Must differ from the implementer's in production."
       }
     },
     local.create_llm_api_key ? {

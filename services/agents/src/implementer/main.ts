@@ -36,7 +36,7 @@ commit message format, and what must be true before a PR is opened.`;
 
 async function handle(ctx: AgentTaskContext<ImplementWorkItem>): Promise<ImplementOutcome> {
   const { item, log } = ctx;
-  const bitbucket = new BitbucketClient(loadBitbucketConfig(), log);
+  const bitbucket = new BitbucketClient(loadBitbucketConfig('implementer'), log);
   const jira = new JiraWriter(loadJiraConfig(), log);
   const pipeline = loadPipelineConfig();
 

@@ -174,6 +174,46 @@ make stacks   # what this deployment can build and test
 make units    # every (agent, stack) unit
 ```
 
+## Bitbucket identities
+
+Three separate credentials, one per identity — not one per deployment:
+
+| Secret | Used by | Needs |
+|---|---|---|
+| `bitbucket-token-read` | Watcher, refiner | Read repo + PRs |
+| `bitbucket-token-implementer` | Implementer | Push branches, open PRs |
+| `bitbucket-token-reviewer` | Reviewer | Comment, approve |
+
+**The implementer and reviewer must be different service accounts in
+production.** Bitbucket does not count an approval from a pull request's own
+author towards a minimum-approval merge check. Share one account between them
+and the reviewer's `approve` call returns 200, the approval does not count, and
+the ticket sits in `Awaiting Merge` with nothing in the logs to explain why —
+the failure looks identical to success.
+
+There is deliberately no fallback between the three environment variables. A
+fallback would save one line in a sandbox and let a production deployment
+collapse two identities silently. A sandbox writes the same value to all three
+explicitly:
+
+```bash
+./scripts/put-secrets.sh --shared-bitbucket   # one token -> all three
+```
+
+`npm run preflight` warns whenever the implementer's and reviewer's tokens
+match, so the compromise stays visible rather than becoming the default.
+
+Each container receives only its own credential. The ECS execution role can
+read all three because it is what performs the injection, but it is not
+reachable from inside a container — so a compromised implementer holds nothing
+that can approve its own pull request. That containment is the point of the
+split, and it is why the identity is chosen by the task definition rather than
+by a runtime flag.
+
+App passwords were removed in July 2026. Use a **repository access token**
+(Bearer, git username `x-token-auth`) or an **API token with scopes** (Basic
+`email:token`, set `BITBUCKET_EMAIL`).
+
 ## Model access
 
 Agents talk to a configurable **OpenAI-compatible** `/chat/completions` endpoint
@@ -201,6 +241,8 @@ make apply
 
 # 3. Populate credentials — prompts, nothing echoed or written to tfvars/state
 make secrets
+# ...or, for a sandbox where one Bitbucket account plays all three parts:
+./scripts/put-secrets.sh --shared-bitbucket
 
 # 4. Build and push images, then roll the watcher
 make images

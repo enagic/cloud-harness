@@ -38,7 +38,7 @@ test suite.`;
 
 async function handle(ctx: AgentTaskContext<ReviewWorkItem>): Promise<ReviewOutcome> {
   const { item, log } = ctx;
-  const bitbucket = new BitbucketClient(loadBitbucketConfig(), log);
+  const bitbucket = new BitbucketClient(loadBitbucketConfig('reviewer'), log);
   const jira = new JiraWriter(loadJiraConfig(), log);
   const pipeline = loadPipelineConfig();
 

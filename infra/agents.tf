@@ -67,7 +67,20 @@ resource "aws_ecs_task_definition" "agent" {
         { name = "BEDROCK_REGION", value = local.bedrock_region },
       ])
 
-      secrets = concat(local.jira_bitbucket_secrets, local.llm_secrets)
+      # Exactly one Bitbucket credential reaches this container: the one for the
+      # identity this agent acts as. The reviewer's task never sees the
+      # implementer's token, so it cannot be tricked into acting as the author
+      # of the pull request it is reviewing.
+      secrets = concat(
+        local.jira_secrets,
+        [
+          {
+            name      = local.bitbucket_env_for_role[local.bitbucket_role_for_agent[each.value.agent]]
+            valueFrom = local.bitbucket_secret_for[local.bitbucket_role_for_agent[each.value.agent]]
+          },
+        ],
+        local.llm_secrets,
+      )
 
       logConfiguration = {
         logDriver = "awslogs"

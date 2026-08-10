@@ -194,18 +194,76 @@ export function loadLlmConfig(): LlmConfig {
 // Bitbucket
 // ---------------------------------------------------------------------------
 
+/**
+ * Which Bitbucket identity a component acts as.
+ *
+ * The implementer and the reviewer must be separate service accounts in
+ * production. Bitbucket does not count an approval from the pull request's own
+ * author towards a minimum-approval merge check, so a shared identity produces
+ * a reviewer whose approve call succeeds while the PR stays unmergeable — a
+ * failure that looks exactly like success in the logs.
+ *
+ * Read-only components (the watcher polling PR state, the refiner reading the
+ * repo for context) share one account, since neither writes anything.
+ */
+export type BitbucketRole = 'read' | 'implementer' | 'reviewer';
+
+const BITBUCKET_TOKEN_ENV: Record<BitbucketRole, string> = {
+  read: 'BITBUCKET_TOKEN',
+  implementer: 'BITBUCKET_IMPLEMENTER_TOKEN',
+  reviewer: 'BITBUCKET_REVIEWER_TOKEN',
+};
+
 export interface BitbucketConfig {
   workspace: string;
   defaultRepo: string;
   defaultBranch: string;
+  /** The identity this token belongs to. Carried so errors can name it. */
+  role: BitbucketRole;
   token: string;
+  /**
+   * Only for an Atlassian API token with Bitbucket scopes, which authenticates
+   * as Basic email:token. A repository or workspace access token is a Bearer
+   * credential with no associated user, and leaves this unset.
+   */
+  email?: string;
 }
 
-export function loadBitbucketConfig(): BitbucketConfig {
-  return {
+/**
+ * Deliberately no fallback to BITBUCKET_TOKEN when a role's own variable is
+ * missing. A fallback would make the sandbox one line shorter and would let a
+ * production deployment silently collapse two service accounts into one, which
+ * is the exact failure this split exists to prevent. Sandbox sets the same
+ * value twice, on purpose and visibly.
+ */
+export function loadBitbucketConfig(role: BitbucketRole): BitbucketConfig {
+  const config: BitbucketConfig = {
     workspace: requireEnv('BITBUCKET_WORKSPACE'),
     defaultRepo: requireEnv('BITBUCKET_DEFAULT_REPO'),
     defaultBranch: requireEnv('BITBUCKET_DEFAULT_BRANCH'),
-    token: requireEnv('BITBUCKET_TOKEN'),
+    role,
+    token: requireEnv(BITBUCKET_TOKEN_ENV[role]),
   };
+
+  const email = optionalEnv('BITBUCKET_EMAIL');
+  if (email !== undefined) config.email = email;
+
+  return config;
+}
+
+/** The env var a role's token is read from. Used by preflight and diagnostics. */
+export function bitbucketTokenEnv(role: BitbucketRole): string {
+  return BITBUCKET_TOKEN_ENV[role];
+}
+
+/** The identity an agent kind acts as. Only the two writers get their own. */
+export function bitbucketRoleFor(agent: AgentKind): BitbucketRole {
+  switch (agent) {
+    case 'implementer':
+      return 'implementer';
+    case 'reviewer':
+      return 'reviewer';
+    case 'refiner':
+      return 'read';
+  }
 }

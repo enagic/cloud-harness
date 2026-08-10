@@ -202,11 +202,13 @@ async function tick(deps: Deps): Promise<void> {
 
 async function main(): Promise<void> {
   const jiraConfig = loadJiraConfig();
-  const bitbucketConfig = loadBitbucketConfig();
+  // Read-only identity: the watcher polls PR state and fetches manifests, and
+  // must never be able to push or approve.
+  const bitbucketConfig = loadBitbucketConfig('read');
   const config = loadPipelineConfig();
   const pollIntervalMs = intEnv('POLL_INTERVAL_SECONDS', 60) * 1000;
 
-  const jira = new JiraClient(jiraConfig, log);
+  const jira = new JiraClient(jiraConfig, config, log);
   const bitbucket = new BitbucketReader(bitbucketConfig, log);
   const queues = new WorkQueues(loadQueueUrls(), log);
 

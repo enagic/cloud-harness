@@ -35,7 +35,7 @@ TODO: fill in the team's actual conventions before this is useful —
 
 async function handle(ctx: AgentTaskContext<RefineWorkItem>): Promise<RefineOutcome> {
   const { item, log } = ctx;
-  const bitbucket = new BitbucketClient(loadBitbucketConfig(), log);
+  const bitbucket = new BitbucketClient(loadBitbucketConfig('read'), log);
   const jira = new JiraWriter(loadJiraConfig(), log);
   const pipeline = loadPipelineConfig();
 

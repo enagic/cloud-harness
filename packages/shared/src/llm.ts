@@ -24,7 +24,15 @@ export interface ChatRequest {
 export interface ChatResponse {
   content: string;
   finishReason: string | undefined;
-  usage?: { inputTokens: number; outputTokens: number };
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+    /**
+     * Reasoning models bill hidden thinking against the same completion budget
+     * as the answer, so outputTokens alone does not explain a truncated reply.
+     */
+    reasoningTokens?: number;
+  };
   /** Which model actually served the request, when the provider reports it. */
   model?: string;
 }
@@ -90,13 +98,27 @@ export class OpenAiCompatibleChatModel implements ChatModel {
 
     const payload = (await response.json()) as {
       model?: string;
-      choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
-      usage?: { prompt_tokens?: number; completion_tokens?: number };
+      choices?: Array<{
+        message?: { content?: string | null; reasoning?: string | null };
+        finish_reason?: string;
+      }>;
+      usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        completion_tokens_details?: { reasoning_tokens?: number };
+      };
     };
 
     const choice = payload.choices?.[0];
-    if (choice?.message?.content === undefined) {
-      throw new LlmError('chat/completions returned no message content');
+    const usage = payload.usage;
+    const reasoningTokens = usage?.completion_tokens_details?.reasoning_tokens ?? 0;
+
+    // `content` is null, not undefined, whenever the model produced no answer
+    // text — so this must be a nullish check. A strict `=== undefined` lets the
+    // null through and the caller fails later on something like `.trim()`,
+    // several frames from the actual cause.
+    if (choice?.message?.content === undefined || choice.message.content === null) {
+      throw new LlmError(describeEmptyContent(choice?.finish_reason, usage?.completion_tokens, reasoningTokens));
     }
 
     const result: ChatResponse = {
@@ -104,14 +126,53 @@ export class OpenAiCompatibleChatModel implements ChatModel {
       finishReason: choice.finish_reason,
     };
     if (payload.model !== undefined) result.model = payload.model;
-    if (payload.usage) {
+    if (usage) {
       result.usage = {
-        inputTokens: payload.usage.prompt_tokens ?? 0,
-        outputTokens: payload.usage.completion_tokens ?? 0,
+        inputTokens: usage.prompt_tokens ?? 0,
+        outputTokens: usage.completion_tokens ?? 0,
       };
+      if (reasoningTokens > 0) result.usage.reasoningTokens = reasoningTokens;
     }
     return result;
   }
+}
+
+/**
+ * Explain an empty completion in terms of what actually went wrong.
+ *
+ * The common cause is a reasoning model with too small a token budget: hidden
+ * thinking is billed against the same allowance as the answer, so a request
+ * that would comfortably fit a short reply returns nothing at all once the
+ * model decides to think first. The generic "no message content" this used to
+ * throw sent you looking at the endpoint, which is the one thing working.
+ */
+function describeEmptyContent(
+  finishReason: string | undefined,
+  completionTokens: number | undefined,
+  reasoningTokens: number,
+): string {
+  const base = `chat/completions returned no content (finish_reason=${finishReason ?? 'unset'})`;
+
+  if (finishReason === 'length' && reasoningTokens > 0) {
+    return (
+      `${base}. The model spent ${reasoningTokens} of ${completionTokens ?? '?'} completion ` +
+      'tokens on reasoning and had none left for the answer. This is a reasoning ' +
+      'model: maxTokens must cover reasoning PLUS the reply, so raise it.'
+    );
+  }
+  if (finishReason === 'length') {
+    return `${base}. The token budget was exhausted before any content was produced; raise maxTokens.`;
+  }
+  if (finishReason === 'content_filter') {
+    return `${base}. The provider filtered the response.`;
+  }
+  if (reasoningTokens > 0) {
+    return (
+      `${base}. The model emitted ${reasoningTokens} reasoning token(s) but no answer text — ` +
+      'it may report content in a non-standard field.'
+    );
+  }
+  return `${base}.`;
 }
 
 /**
