@@ -64,8 +64,15 @@ resource "aws_ecs_task_definition" "agent" {
         { name = "LLM_MODEL", value = each.value.cfg.model != "" ? each.value.cfg.model : var.llm_default_model },
         { name = "LLM_REASONING_EFFORT", value = each.value.cfg.reasoning_effort },
         { name = "LLM_REQUEST_TIMEOUT_SECONDS", value = tostring(var.llm_request_timeout_seconds) },
+        { name = "LLM_MAX_OUTPUT_TOKENS", value = tostring(var.llm_max_output_tokens) },
         { name = "BEDROCK_REGION", value = local.bedrock_region },
-      ])
+        ],
+        # Refiner-only knobs. Kept out of the other task definitions so an
+        # operator reading them is not left wondering what a step budget does to
+        # an agent that has no tool loop yet.
+        each.value.agent == "refiner" ? [
+          { name = "REFINER_MAX_STEPS", value = tostring(var.refiner_max_steps) },
+      ] : [])
 
       # Exactly one Bitbucket credential reaches this container: the one for the
       # identity this agent acts as. The reviewer's task never sees the

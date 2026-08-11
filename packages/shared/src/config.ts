@@ -29,6 +29,17 @@ export function intEnv(name: string, fallback: number): number {
   return parsed;
 }
 
+export function boolEnv(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === 'true' || normalized === '1') return true;
+  if (normalized === 'false' || normalized === '0') return false;
+  // Deliberately not treating anything else as false: a flag that silently
+  // reads "yes" as off is worse than one that refuses to start.
+  throw new Error(`Environment variable ${name} must be true or false, got: ${raw}`);
+}
+
 // ---------------------------------------------------------------------------
 // Jira
 // ---------------------------------------------------------------------------

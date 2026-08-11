@@ -15,7 +15,7 @@
     "typecheck": "tsc --build",
     "clean": "tsc --build --clean && rm -rf packages/*/dist services/*/dist",
     "lint": "echo 'TODO: pick a linter (eslint/biome) and wire it here' && exit 0",
-    "test": "npm run build && node --test \"packages/shared/dist/**/*.test.js\"",
+    "test": "npm run build && node --test \"packages/*/dist/**/*.test.js\" \"services/*/dist/**/*.test.js\"",
     "preflight": "npm run build && node --env-file-if-exists=.env.local services/watcher/dist/preflight.js"
   },
   "devDependencies": {

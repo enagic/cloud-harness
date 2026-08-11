@@ -11,33 +11,21 @@
 import {
   isRefineWorkItem,
   loadBitbucketConfig,
-  loadJiraConfig,
-  loadPipelineConfig,
+  loadLlmConfig,
   type RefineOutcome,
   type RefineWorkItem,
 } from '@cloud-harness/shared';
 
 import { BitbucketClient } from '../clients/bitbucket.js';
-import { JiraWriter } from '../clients/jira.js';
 import { bootstrap, type AgentTaskContext } from '../runtime/consumer.js';
+import { createAgentModel } from '../runtime/model.js';
 import { cleanupWorkspace, prepareWorkspace } from '../runtime/workspace.js';
-
-export const DEFAULT_SYSTEM_PROMPT = `You refine Jira tickets into implementable stories.
-
-You have read access to the repository the work will land in. Use it: point at
-the files and modules the change touches, and note prior art the implementer
-should follow rather than reinvent.
-
-TODO: fill in the team's actual conventions before this is useful —
-  - what "implementable" means here (repo layout, testing bar, definition of done)
-  - how much design latitude the implementer gets vs. what must be pinned down
-  - how to flag genuine ambiguity as an open question instead of guessing`;
+import { refine } from './refine.js';
 
 async function handle(ctx: AgentTaskContext<RefineWorkItem>): Promise<RefineOutcome> {
   const { item, log } = ctx;
   const bitbucket = new BitbucketClient(loadBitbucketConfig('read'), log);
-  const jira = new JiraWriter(loadJiraConfig(), log);
-  const pipeline = loadPipelineConfig();
+  const model = createAgentModel(loadLlmConfig(), log);
 
   let workdir: string | undefined;
   try {
@@ -48,20 +36,39 @@ async function handle(ctx: AgentTaskContext<RefineWorkItem>): Promise<RefineOutc
       log,
     });
 
-    // TODO:
-    //  1. Explore the repo for context relevant to item.draftDescription.
-    //     Read-only — the refiner must never push.
-    //  2. Call ctx.model.complete() to produce a RefinedStory, folding in
-    //     item.reviewerComments when this is a second pass so the human's
-    //     feedback is addressed rather than the story being rewritten from
-    //     scratch.
-    //  3. jira.publishRefinement(item.issueKey, refined)
-    //  4. jira.applyMutation(item.issueKey, {
-    //       status: pipeline.statuses.refinementReview,
-    //     })  <- hands off to human gate 1
-    //  5. Call ctx.onProgress() periodically throughout.
-    void pipeline;
-    throw new Error('refiner handler not implemented');
+    const result = await refine(item, {
+      model,
+      log,
+      workdir,
+      signal: ctx.signal,
+      onProgress: ctx.onProgress,
+    });
+
+    // Everything the refiner is *for* has happened by here. What is missing is
+    // the reporting half, and it is blocked on decisions rather than effort:
+    //
+    //  - `RefineOutcome.succeeded` carries a structured `RefinedStory`, which is
+    //    the rejected format. It becomes prose, and grows the hand-back variants
+    //    from HANDOFF decision 4 ("not enough detail", "too large, here is a
+    //    breakdown") that neither succeeded nor failed can express today.
+    //  - Publishing is `jira.publishRefinement`, still a stub, and per decision 8
+    //    it should land as an intent-shaped tool rather than a REST wrapper.
+    //  - The transition to `Refinement Review` is NOT this agent's to make any
+    //    more — decision 2 moved status mutations to the watcher.
+    //
+    // Until then: log the story, and report a terminal failure so the SQS
+    // message is deleted rather than redelivered against an unchanged ticket.
+    log.info('refined story (not published)', {
+      exhaustedSteps: result.exhaustedSteps,
+      readPaths: result.readPaths,
+      story: result.story,
+    });
+
+    return {
+      status: 'failed',
+      reason: 'refiner produces the story but does not publish it yet',
+      retryable: false,
+    };
   } finally {
     if (workdir !== undefined) await cleanupWorkspace(workdir, log);
   }

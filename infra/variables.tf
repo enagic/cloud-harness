@@ -426,6 +426,26 @@ variable "llm_request_timeout_seconds" {
   default     = 300
 }
 
+variable "llm_max_output_tokens" {
+  description = <<-EOT
+    Completion budget per model call. Deliberately generous: a reasoning model
+    bills hidden thinking against the same budget as the answer, so a cap sized
+    for the reply alone returns an empty completion.
+  EOT
+  type        = number
+  default     = 8192
+}
+
+variable "refiner_max_steps" {
+  description = <<-EOT
+    Tool-call rounds the refiner gets to explore the repository before it must
+    write the story. Low enough to stop a model that starts reading everything;
+    high enough for list -> search -> read the few files that came back.
+  EOT
+  type        = number
+  default     = 12
+}
+
 variable "enable_bedrock_access" {
   description = <<-EOT
     Attach bedrock:InvokeModel / InvokeModelWithResponseStream to the agent task
