@@ -166,3 +166,18 @@ llm_default_model = "your-model-id"
 # single_nat_gateway = true   # false for prod: one NAT per AZ
 # log_retention_days = 30
 # alarm_email        = "platform-alerts@your-org.com"
+
+# --- Disposability ----------------------------------------------------------
+# For a stack that gets destroyed and recreated — an experiment run for a day at
+# a time. Both are wrong for production; see variables.tf for what they give up.
+#
+# Without these, a destroy is neither clean nor repeatable: ECR refuses to
+# delete once any image has been pushed, and secrets enter a 7-day recovery
+# window that keeps their NAMES reserved, so the next apply fails.
+#
+# disposable_deployment = true
+#
+# Container Insights makes AWS create a performance log group outside
+# Terraform's state, which then survives every destroy.
+#
+# enable_container_insights = false

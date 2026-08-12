@@ -1,9 +1,11 @@
 resource "aws_ecs_cluster" "main" {
   name = local.name_prefix
 
+  # Off leaves no orphaned performance log group behind on destroy; see the
+  # variable. Fargate task-level CPU/memory metrics are in CloudWatch either way.
   setting {
     name  = "containerInsights"
-    value = "enabled"
+    value = var.enable_container_insights ? "enabled" : "disabled"
   }
 
   tags = {

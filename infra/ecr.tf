@@ -12,6 +12,10 @@ resource "aws_ecr_repository" "this" {
   name                 = each.value
   image_tag_mutability = "MUTABLE" # POC pushes :latest; pin to IMMUTABLE + digests for prod
 
+  # A repository with images in it refuses to delete otherwise, which is every
+  # repository here after the first `make images`. See disposable_deployment.
+  force_delete = var.disposable_deployment
+
   image_scanning_configuration {
     scan_on_push = true
   }

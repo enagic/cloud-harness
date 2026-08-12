@@ -49,9 +49,12 @@ locals {
 resource "aws_secretsmanager_secret" "this" {
   for_each = local.secrets
 
-  name                    = each.value.name
-  description             = each.value.description
-  recovery_window_in_days = 7
+  name        = each.value.name
+  description = each.value.description
+
+  # 0 deletes immediately. The window is not just a delay — it holds the secret
+  # NAME, so the next apply cannot recreate it. See disposable_deployment.
+  recovery_window_in_days = var.disposable_deployment ? 0 : 7
 
   tags = {
     Name = each.value.name

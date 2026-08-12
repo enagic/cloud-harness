@@ -19,13 +19,24 @@ export async function prepareWorkspace(args: {
   branch?: string;
   bitbucket: BitbucketClient;
   log: Logger;
+  /**
+   * Truncate history to this many commits. A reader passes 1; anything that
+   * rebases must leave it unset, because a shallow clone cannot replay commits
+   * onto a base branch it does not have.
+   */
+  depth?: number;
 }): Promise<string> {
   const dir = await mkdtemp(join(workspaceRoot, `${args.issueKey}-`));
   args.log.info('prepared workspace', { dir, branch: args.branch ?? args.repo.baseBranch });
 
   // TODO: configure git user.name / user.email for the commit author here, and
   // decide whether dependency install happens now or is left to the agent.
-  await args.bitbucket.clone(args.repo, dir, args.branch);
+  await args.bitbucket.clone(
+    args.repo,
+    dir,
+    args.branch,
+    args.depth === undefined ? {} : { depth: args.depth },
+  );
 
   return dir;
 }

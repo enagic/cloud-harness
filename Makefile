@@ -101,6 +101,10 @@ workflow: ## Print the Jira statuses and labels this deployment expects
 secrets: ## Populate Secrets Manager values (prompts, nothing echoed)
 	./scripts/put-secrets.sh
 
+.PHONY: secrets-from-env
+secrets-from-env: ## Populate secrets from .env.local instead of prompting (ENV_FILE=... to override)
+	./scripts/put-secrets.sh --from-env $(or $(ENV_FILE),.env.local)
+
 .PHONY: restart-watcher
 restart-watcher: ## Force a new watcher deployment (picks up new image/secrets)
 	aws ecs update-service --cluster $(CLUSTER) \

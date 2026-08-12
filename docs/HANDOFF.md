@@ -1,27 +1,60 @@
 # Handoff — 2026-08-12
 
-The refiner is written. It is one unimplemented method away from running end to
-end on a real ticket. Delete this file once that has happened and the decisions
-below have landed.
+**The refiner has run end to end on a real ticket.** KAN-6 went To Do →
+Refining → Refinement Review, with a model-written story published into the
+description, against live Jira and live Bitbucket. The refiner-only vertical
+slice is done. What remains is the decisions below and the other two agents.
 
 ## READ FIRST
 
-**1. Everything is uncommitted.** 19 modified files, nothing staged. `npm test`
-is **77/77** and `tsc --build` is clean, so it is a sound commit whenever you
-want one. Do not start by reverting anything.
+**1. The watcher's read path to dispatch is implemented and verified live.**
+`BitbucketReader.readManifest` and `findPullRequestForIssue`
+([`services/watcher/src/bitbucket.ts`](../services/watcher/src/bitbucket.ts))
+are real, against live Bitbucket. `resolveRuntime` returns the sandbox's actual
+manifest (`source: 'manifest'`, stack `node`, its four commands), and the refine
+path runs `decide` → `resolveRuntime` → `buildWorkItem` to a `RefineWorkItem`
+that passes `isRefineWorkItem`. The only untested step left in a dispatch is
+`queues.send`, which needs SQS to exist — Terraform has still never been applied.
 
-**2. Two lost source files survive only as pinned git refs.** They were written
-by an earlier session, never committed, and existed only as dangling blobs that
-`git gc` would eventually prune. They are now pinned:
+The earlier framing of this section was wrong about *where* the watcher died,
+and the correction is worth keeping: **`rehydrate` runs before `resolveRuntime`
+and calls `findPullRequestForIssue` for every ticket**, so the throw came from
+there and was swallowed by the per-ticket `catch` — the ticket was logged as
+"ticket processing failed" and left alone, never reaching the `Agent Failed`
+marking that `resolveRuntime` would have caused. Both stubs were on the path;
+only one was named.
+
+The option that was *not* taken: skipping runtime resolution for agents that do
+not need it (the refiner is `needs_runtime = false` in
+[`locals.tf:6`](../infra/locals.tf), routes to a single `default` queue, and
+never reads `item.runtime`). That remains available as a later optimisation —
+it would save the refiner one Bitbucket call per dispatch — but it is no longer
+unblocking anything, and it would have left `readManifest` to be written for the
+implementer anyway. The open question it carried (what `runtime` holds on a
+refine item) is moot: the refiner now gets a real one.
+
+`getPullRequest` is **still a stub**, deliberately. It is only reached from
+`reconcile`, which only runs when a ticket already has an agent PR — never true
+on the refine path. Its unresolved part is mergeability, not HTTP: `PENDING`
+must map to unknown rather than conflicted, or every fresh PR queues a spurious
+rebase. Note `findPullRequestForIssue` fills `mergeable: true` as a placeholder,
+which is safe *only* because `reconcilePullRequest` is never handed that object
+— it re-fetches through `getPullRequest`. Do not start reading `mergeable` off
+the lookup path.
+
+**2. One lost source file survives only as a pinned git ref.** Written by an
+earlier session, never committed, existing only as a dangling blob that
+`git gc` would eventually prune:
 
 ```
-git cat-file -p refs/recovered/bitbucket-client-with-clone   # USE THIS
 git cat-file -p refs/recovered/refine-structured-rejected    # reference only
 ```
 
-The first implements `BitbucketClient.clone` and is the immediate next step —
-see below. The second is a `refine.ts` built on the rejected fenced-JSON format;
-it does not compile against the current tree and is kept only as a record.
+It is a `refine.ts` built on the rejected fenced-JSON format; it does not
+compile against the current tree and is kept only as a record.
+
+`refs/recovered/bitbucket-client-with-clone` has been **consumed** — its `clone`
+is now in the tree, verified against real Bitbucket, and the ref can be deleted.
 
 **3. Do not state sandbox ticket state from this file.** It goes stale in hours.
 A previous session claimed a relabelling was outstanding when the user had
@@ -29,26 +62,42 @@ already done it. Query Jira — the dry run at the bottom prints the live board.
 
 ## Where the refiner actually is
 
-Six steps. Five are written:
+Six steps. All six ran against KAN-6:
 
 | # | Step | State |
 |---|---|---|
-| 1 | Clone the repo | **STUB — the only blocker** |
+| 1 | Clone the repo | Done — `BitbucketClient.clone`, verified live |
 | 2 | Read the repo, write the story | Done — AI SDK tool loop, `refine.ts` |
 | 3 | Re-check the ticket is still ours | Done — the lane guard |
 | 4 | Write the story into the description | Done — `publishRefinement` |
 | 5 | Move the card to `Refinement Review` | Done — `applyMutation` |
 | 6 | Report the outcome | Done for the happy path |
 
-`BitbucketClient.clone` throws `not implemented`. It is an intentional stub, not
-a fault — nothing has ever reached it.
+### What the live run proved
 
-### Next step: restore `clone`
+- **`clone` works.** Authenticates as `x-token-auth`, `--depth 1` yields exactly
+  one commit, and the token is absent from `.git/config` and `git remote -v` —
+  the `GIT_ASKPASS` route does what it claims.
+- **Workflow transitions work.** This was previously unverified: `resolveStatusIds`
+  only checked that statuses *exist* and no ticket had ever moved. Two real
+  transitions now have (To Do → Refining → Refinement Review), so the gotcha
+  about unverified transitions is retired.
+- **The tool loop terminates on its own.** 12-step budget, `finishReason: 'stop'`,
+  `exhaustedSteps: false`, ~6.3k in / 2.2k out tokens, ~59s wall clock. The
+  model read `.cloud-harness.yml` and correctly inferred that a `package.json`
+  is mandatory because the manifest's own commands are `npm ci` / `npm test`.
+- **Gate 1 holds.** The board now idles the ticket with "awaiting human
+  refinement review", which is exactly the intended stopping point.
 
-`refs/recovered/bitbucket-client-with-clone` implements it, and it was checked
-against the current tree: `runCommand` from `runtime/exec.ts` matches, and
-`BitbucketConfig.role` / `.email` both exist with the semantics it assumes. It
-is better than an obvious first attempt in four ways worth preserving:
+Worth knowing: the sandbox repo is nearly empty — `.cloud-harness.yml` and
+nothing else. The refiner behaved well on it, but this has *not* exercised
+exploration of a real codebase, and `readPaths` was a single file.
+
+### Restored `clone` — what is worth preserving in it
+
+Recovered from the pinned ref and checked against the tree before use:
+`runCommand` from `runtime/exec.ts` matches, and `BitbucketConfig.role` /
+`.email` both exist with the semantics it assumed.
 
 - The token goes through a throwaway **`GIT_ASKPASS`** script, never the URL —
   so it stays out of `.git/config`, `git remote -v`, and the process list.
@@ -57,12 +106,19 @@ is better than an obvious first attempt in four ways worth preserving:
   in July 2026.
 - **Shell-quotes** the branch name, which comes off a human-influenced work item
   and reaches `bash -lc`.
-- A **`depth`** option, with the reason: the refiner only reads and wants
-  `--depth 1`; anything that rebases needs full history to replay commits.
+- A **`depth`** option, now plumbed through `prepareWorkspace`; the refiner
+  passes `depth: 1`. Anything that rebases must leave it unset, because a
+  shallow clone cannot replay commits onto a base branch it does not have.
 
-Only `clone` is implemented in that file — push, PR lifecycle and rebase are
-still stubs there too. Restore it, keep the rest as stubs, then run the refiner
-against KAN-6.
+Push, PR lifecycle and rebase remain stubs, deliberately.
+
+### `handle` was split out of `main.ts`
+
+`refiner/handle.ts` holds the work, `refiner/main.ts` is now only the `bootstrap`
+call — the shape `consumer.ts` already described as "thin `main.ts` entrypoints".
+The reason is testability: the handler is importable without starting the SQS
+consume loop, which is what let the live run drive the real code path rather
+than a reimplementation of it. Do the same for the implementer and reviewer.
 
 ## What landed this session
 
@@ -427,20 +483,26 @@ at code review" does not work until this is solved.
 
 ## Suggested next step
 
-Still the **refiner-only vertical slice** — one agent working end to end on a
-real ticket — and it is now one method away. In order:
+The refiner-only slice is done, and the watcher can now build its dispatch. The
+next one is **that dispatch actually landing in a queue**:
 
-1. **Restore `clone`** from `refs/recovered/bitbucket-client-with-clone`. See
-   "Next step" at the top for what is worth preserving in it.
-2. **Run the refiner against KAN-6.** The dry run at the bottom already confirms
-   the watcher would dispatch it. Expect the first real failures to be in
-   territory nothing has exercised yet: the clone itself, and the Jira
-   transition — `resolveStatusIds` only checks that statuses *exist*, so no
-   ticket has ever actually moved (see Gotchas).
-3. **Then decide the hand-back vocabulary** (decision 4). It was deliberately
-   left until after a successful run, because a real refinement makes it obvious
-   which cases matter. Standing down at the lane guard is a third case alongside
-   the two in decision 4, and today it reports as an ordinary failure.
+1. ~~**Decide how the refine path gets past `resolveRuntime`**~~ — **DONE.**
+   `readManifest` and `findPullRequestForIssue` are implemented and verified
+   against the live sandbox; see READ FIRST. What is left before a watcher can
+   dispatch for real is `queues.send`, and that needs SQS to exist.
+2. **Then decide the hand-back vocabulary** (decision 4). It was deliberately
+   left until after a successful run, and the run makes the shape clearer: on a
+   nearly-empty repo the model produced a confident story plus a genuine open
+   question about intent. That is the "not enough detail" case arriving as
+   ordinary success, which is exactly the ambiguity decision 4 exists to remove.
+   Standing down at the lane guard is a third case, and today it reports as an
+   ordinary failure.
+3. **Give the refiner a real repo to read.** Everything so far is one file. The
+   step budget, the prompt, and `readPaths` are all untested against a codebase
+   with actual structure.
+
+Deploying is not on this path and is still a long way off — Terraform has never
+been applied.
 
 Not on the critical path, and fine to leave: the attempt counter moving to
 labels (decision 7), the Atlassian tool shapes (decision 8), and everything
@@ -482,15 +544,60 @@ about the implementer and reviewer.
   hours and a previous session asserted a relabelling was outstanding when the
   user had already done it. Query Jira — the dry run below prints the board and
   what the state machine would do with it.
-- **Workflow transitions are unverified.** `resolveStatusIds` only checks that
-  statuses *exist*. The user confirmed no transition restrictions were
-  configured, but nothing has actually moved a ticket yet.
-- **`terraform fmt`** flags pre-existing issues in `locals.tf` and
-  `variables.tf`, unrelated to recent edits.
+- ~~**Workflow transitions are unverified.**~~ Retired: KAN-6 has now moved
+  To Do → Refining → Refinement Review through `applyMutation` against the live
+  board. `resolveStatusIds` still only checks that statuses *exist*, but the
+  transition path itself is proven.
+- **`terraform fmt`** flags a pre-existing issue in `locals.tf`, unrelated to
+  recent edits.
+- **Bitbucket 404s a repo the credential cannot see**, with the same status as a
+  file that is not there. `readManifest` therefore reported "no manifest" for
+  `kwon-cloud/java-sandbox` — which the read token has no access to — and
+  `resolveRuntime` fell back to the default stack, i.e. it was about to run a
+  Java repo in the Node image. Fixed: after every filename 404s, the repo itself
+  is probed, and an unreadable repo throws instead of reporting absence. The
+  read identity is a **repository** access token scoped to `sandbox` alone; a
+  second repo needs a workspace access token. Note `BITBUCKET_DEFAULT_REPO` is
+  still single-repo config (multi-repo is a TODO at `index.ts:215`), so pointing
+  the watcher at a different repo today means changing tfvars.
+- **`kwon-cloud/java-sandbox` exists and is parked.** A real Maven project on
+  `develop` — Java 21, JUnit 5, a passing suite, and a `.cloud-harness.yml`
+  declaring `stack: jvm` — built as the fixture for a jvm end-to-end run later.
+  **Its build has never been executed:** there is no JDK, no Maven and no Docker
+  on the dev machine, so the POM and the three manifest commands are unverified.
+  Run them once in the jvm agent image before trusting a jvm e2e result. Focus
+  is the node repo (`kwon-cloud/sandbox`) until then.
+- **macOS ships bash 3.2, so `declare -A` is a trap in `scripts/`.** It is not a
+  syntax error there — it silently declares an *indexed* array and evaluates
+  each subscript as arithmetic, so the script dies on its own first lookup with
+  "unbound variable". `put-secrets.sh` had this and never ran on this machine;
+  it now uses `case` functions instead. Do not reintroduce associative arrays
+  without a version guard.
+- **The stack is built to be destroyed daily** — `disposable_deployment = true`
+  in `infra/terraform.tfvars`. Without it `destroy` fails on ECR repos holding
+  images, and the secrets' 7-day recovery window reserves their names so the
+  *next* apply fails. Container Insights is off for the same reason: it creates
+  a performance log group outside Terraform's state that survives every destroy.
+  Deregistered ECS task definitions still accumulate as INACTIVE revisions;
+  nothing in Terraform can remove those.
 - **`tsc --build` leaves orphaned output in `dist/`.** That is how a deleted
   source file kept passing its tests. If test counts ever look surprising, check
   `dist/` against `src/`.
-- **Terraform has never been applied. No AWS resources exist.**
+- **Terraform has been applied and the whole pipeline ran in AWS.** 133
+  resources; KAN-7 went To Do → Refining → Refinement Review with a 5,142-char
+  story, driven by the deployed watcher, the SQS queue, the dispatcher Lambda
+  and a Fargate refiner task. `stackSource: "manifest"` in the dispatch log is
+  `readManifest` working against live Bitbucket. Queue drained, DLQ empty.
+- **`npm ci` failed in the image build: `zod@4.4.3` was missing from
+  `package-lock.json`.** Pre-existing drift — `packages/shared` and
+  `services/agents` both declare zod and the lock was never regenerated. Local
+  `npm test` passes regardless because `node_modules` already has it, so only
+  `npm ci` in Docker catches it. Fixed with `npm install --package-lock-only`;
+  **the updated lockfile is uncommitted.**
+- **Do not force a watcher redeployment immediately after `apply`.** The first
+  task died with `CannotPullContainerError` — a timeout to the ECR interface
+  endpoint's IP, which was still settling. ECS retried and the next task came up
+  clean, so it costs a couple of minutes, not a failure.
 
 ## Verifying the state machine without deploying
 
@@ -498,12 +605,16 @@ This dry-run prints what the watcher *would* do against the live board. It was
 useful enough to keep, but was never promoted out of scratch — the user declined
 an `npm run dryrun` script.
 
-Last run after the lane change, and the lane model is confirmed end to end
-against real Jira, not just unit tests:
+The lane model is confirmed end to end against real Jira, not just unit tests.
+Illustrative only — **query the board, do not quote this**:
 
 ```
-KAN-6   [To Do    ] labels=["agent"]  dispatch_refine  -> Refining
+KAN-6   [To Do             ] labels=["agent"]  dispatch_refine  -> Refining
+KAN-6   [Refinement Review ] labels=["agent"]  idle  awaiting human refinement review
 ```
+
+The second line is the state the refiner leaves behind, and it is where KAN-6
+was parked after the live run.
 
 ```js
 const R = '/Users/mkwon/Code/cloud-harness';

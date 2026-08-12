@@ -47,6 +47,28 @@ variable "single_nat_gateway" {
   default     = true
 }
 
+variable "disposable_deployment" {
+  description = <<-EOT
+    This stack is expected to be destroyed and recreated, so destroy actually
+    destroys. Two effects, both about `terraform destroy` leaving nothing
+    behind:
+
+      - ECR repositories delete even when they hold images. Without this,
+        destroy FAILS the moment any image has been pushed, which is every
+        deployment that has run.
+      - Secrets delete immediately instead of entering a 7-day recovery
+        window. The window does not just delay cleanup: it reserves the secret
+        NAMES, so the next apply fails with "already scheduled for deletion".
+        A daily up/down cycle is impossible with it on.
+
+    NEVER true in production. It removes the recovery window that exists so an
+    accidental destroy is survivable, and lets a repository holding the only
+    copy of an image be deleted without complaint.
+  EOT
+  type        = bool
+  default     = false
+}
+
 # ---------------------------------------------------------------------------
 # Watcher (the only always-on component)
 # ---------------------------------------------------------------------------
@@ -493,6 +515,20 @@ variable "log_retention_days" {
   description = "CloudWatch log retention."
   type        = number
   default     = 30
+}
+
+variable "enable_container_insights" {
+  description = <<-EOT
+    ECS Container Insights on the cluster.
+
+    Off for a deployment you tear down regularly. Enabling it makes AWS create
+    /aws/ecs/containerinsights/<cluster>/performance OUTSIDE Terraform's state,
+    with no expiry — so it survives every destroy and accumulates across
+    apply/destroy cycles. Nothing else here leaks that way; every other log
+    group is a managed resource.
+  EOT
+  type        = bool
+  default     = true
 }
 
 variable "alarm_email" {
