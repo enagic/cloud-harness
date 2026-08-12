@@ -48,7 +48,7 @@ export function buildWorkItem(
         agent: 'refiner',
         draftDescription: ticket.description,
       };
-      if (ticket.reviewerComments?.length) item.reviewerComments = ticket.reviewerComments;
+      if (ticket.conversation?.length) item.conversation = ticket.conversation;
       return item;
     }
 

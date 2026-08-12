@@ -11,7 +11,7 @@
  * rewrite — see countAttempts below.
  */
 
-import type { ImplementReason } from './types.js';
+import type { ImplementReason, TicketComment } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -186,8 +186,11 @@ export interface TicketSnapshot {
    */
   attempts: number;
 
-  /** Comments a human left when sending a refinement back. */
-  reviewerComments?: string[];
+  /**
+   * The recent comment thread, agent and human alike, oldest first. Populated
+   * only for tickets about to be refined; `decide()` never reads it.
+   */
+  conversation?: TicketComment[];
 
   /**
    * PR coordinates, once one exists. Rehydrated from Bitbucket by branch naming

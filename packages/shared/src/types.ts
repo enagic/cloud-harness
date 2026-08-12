@@ -68,15 +68,42 @@ interface WorkItemBase {
 // Refiner
 // ---------------------------------------------------------------------------
 
+/**
+ * One Jira comment, tagged with which side of the pipeline wrote it.
+ *
+ * The role is the point. The description carries the story and the comments
+ * carry the conversation about it, and a conversation only reconstructs if you
+ * can tell a question from its answer. Jira issue comments are flat — there is
+ * no thread to hang a reply on — so the pairing is order plus authorship, and
+ * dropping the agent's own comments would hand the next pass a set of answers
+ * with nothing to attach them to.
+ */
+export interface TicketComment {
+  /** `agent` means the pipeline's own Jira account wrote it. */
+  author: 'agent' | 'human';
+  text: string;
+}
+
 export interface RefineWorkItem extends WorkItemBase {
   agent: 'refiner';
-  /** The human's rough description, as it stands on the board. */
+  /**
+   * The description as it stands on the board.
+   *
+   * On a first pass this is the human's rough draft. On a second pass it is the
+   * refiner's own previous story, possibly with a human's edits on top — a
+   * send-back is a column move and does not touch the description. Either way
+   * it is the thing to improve, not a thing to start over from.
+   */
   draftDescription: string;
   /**
-   * Set when a human sent the refinement back rather than approving it —
-   * carries their comments so the refiner can revise rather than restart.
+   * The recent comment thread, oldest first, when the ticket is being refined
+   * from a draft column in the agent lane.
+   *
+   * This is how a second pass rehydrates: the agent's own open questions and
+   * the human's answers to them are both here, in order. Empty or absent on a
+   * first pass, which is how the refiner knows it is one.
    */
-  reviewerComments?: string[];
+  conversation?: TicketComment[];
 }
 
 /**
@@ -183,6 +210,16 @@ export type WorkItem = RefineWorkItem | ImplementWorkItem | ReviewWorkItem;
 // Outcomes
 // ---------------------------------------------------------------------------
 
+/**
+ * Two variants, deliberately — "here is the story" or "I crashed".
+ *
+ * There is no `needs_information` and no `too_large`. Both were proposed and
+ * both are the same board gesture as a success: publish the story, comment,
+ * move to Refinement Review, human decides. What distinguishes them is written
+ * where a human will actually read it — the confidence and size the refiner
+ * puts in the story, and the open questions it leaves in a comment — not an
+ * enum that nothing downstream branches on. See HANDOFF decision 4.
+ */
 export type RefineOutcome =
   | { status: 'succeeded'; refined: string }
   | { status: 'failed'; reason: string; retryable: boolean };

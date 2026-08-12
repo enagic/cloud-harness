@@ -1,4 +1,5 @@
 export * from './adf.js';
+export * from './comments.js';
 export * from './config.js';
 export * from './llm.js';
 export * from './logger.js';

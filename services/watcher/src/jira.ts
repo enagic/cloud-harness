@@ -9,12 +9,15 @@
 
 import {
   adfToText,
+  isAgentComment,
+  signAgentComment,
   textToAdf,
   type JiraConfig,
   type Logger,
   type PipelineConfig,
   type StatusIds,
   type StatusTransition,
+  type TicketComment,
   type TicketMutation,
   type TicketSnapshot,
 } from '@cloud-harness/shared';
@@ -48,8 +51,6 @@ const SNAPSHOT_FIELDS = 'summary,description,status,labels';
 export class JiraClient {
   /** Resolved once by resolveStatusIds, then reused for JQL and validation. */
   private statusNameToId = new Map<string, string>();
-  /** The pipeline's own account, so its comments can be excluded from reviewer feedback. */
-  private selfAccountId: string | undefined;
 
   constructor(
     private readonly config: JiraConfig,
@@ -187,7 +188,7 @@ export class JiraClient {
       nextPageToken = page.isLast === true ? undefined : page.nextPageToken;
     } while (nextPageToken);
 
-    // The refiner needs the human's comments when a refinement was sent back.
+    // The refiner needs the comment thread when a refinement was sent back.
     // That signal used to be a label; now it is a ticket that has come back to
     // a draft column still in the agent lane, which is also what a brand-new
     // ticket looks like. Both are about to be refined and only those pay for
@@ -197,7 +198,7 @@ export class JiraClient {
         this.pipeline.draftStatuses.includes(ticket.status) &&
         ticket.labels.includes(this.pipeline.labels.agentLane)
       ) {
-        ticket.reviewerComments = await this.getHumanComments(ticket.issueKey);
+        ticket.conversation = await this.getConversation(ticket.issueKey);
       }
     }
 
@@ -205,27 +206,34 @@ export class JiraClient {
   }
 
   /**
-   * Recent comments not written by the pipeline's own account.
+   * The recent comment thread, oldest first, each comment tagged with whether
+   * the pipeline wrote it.
    *
-   * Filtering by author rather than by timestamp keeps this independent of the
-   * changelog: the pipeline's own review findings would otherwise read back as
-   * human feedback and get fed to the refiner as if a person had written them.
+   * Tagged, not filtered. An earlier version dropped the pipeline's own comments
+   * outright so that review findings could not read back as human feedback —
+   * which also discarded the refiner's own questions, handing the next pass a
+   * set of answers with the questions removed. Jira issue comments are flat, so
+   * order and authorship are the only things pairing a reply to what it answers.
+   *
+   * The tag comes from the pipeline's signature on the text, not from the
+   * comment's author account. See `isAgentComment` for why the account is the
+   * wrong signal — in short, the pipeline's Jira identity may be a person's own,
+   * and under that configuration an author check is not merely weak, it is
+   * inverted.
    */
-  private async getHumanComments(issueKey: string): Promise<string[]> {
-    if (this.selfAccountId === undefined) {
-      const self = await this.request<{ accountId?: string }>('/rest/api/3/myself');
-      this.selfAccountId = self.accountId ?? '';
-    }
-
+  private async getConversation(issueKey: string): Promise<TicketComment[]> {
+    // Newest first from Jira, then reversed: the cap has to bite at the far end
+    // of the history, not the recent end. A long-running ticket loses its
+    // oldest exchanges, which are the ones already settled.
     const params = new URLSearchParams({ orderBy: '-created', maxResults: '20' });
-    const page = await this.request<{
-      comments?: Array<{ author?: { accountId?: string }; body?: unknown }>;
-    }>(`/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment?${params.toString()}`);
+    const page = await this.request<{ comments?: Array<{ body?: unknown }> }>(
+      `/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment?${params.toString()}`,
+    );
 
     return (page.comments ?? [])
-      .filter((comment) => comment.author?.accountId !== this.selfAccountId)
       .map((comment) => adfToText(comment.body))
       .filter((text) => text.length > 0)
+      .map((text): TicketComment => ({ author: isAgentComment(text) ? 'agent' : 'human', text }))
       .reverse();
   }
 
@@ -303,11 +311,14 @@ export class JiraClient {
       });
     }
 
-    // 2. Comment — v3 takes Atlassian Document Format, not markdown.
+    // 2. Comment — v3 takes Atlassian Document Format, not markdown. Signed, so
+    //    the refiner can tell this from a human's reply when it reads the thread
+    //    back, and so a human can tell on a board where the pipeline posts under
+    //    their own account.
     if (mutation.comment) {
       await this.request(`/rest/api/3/issue/${key}/comment`, {
         method: 'POST',
-        body: { body: textToAdf(mutation.comment) },
+        body: { body: textToAdf(signAgentComment(mutation.comment)) },
       });
     }
 

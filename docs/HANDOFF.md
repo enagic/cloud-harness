@@ -134,6 +134,16 @@ than a reimplementation of it. Do the same for the implementer and reviewer.
 - **The agent-side Jira write path**, mirroring the watcher's verified client:
   `request`, `readLaneState`, `publishRefinement`, `applyMutation`,
   `transitionTo`.
+- **One hand-back, carrying a confidence and a size** (decision 4, rewritten
+  below). `RefineOutcome` unchanged; the `## Estimate` block and the
+  `ask_human` buffered tool are new, `getHumanComments` became
+  `getConversation`, and an empty story now throws instead of publishing
+  nothing. Unit-tested; not yet exercised against a live board.
+- **The pipeline signs its Jira comments** (`comments.ts`), and authorship is
+  read off that signature rather than off the comment's author account. The
+  account check could never work in the sandbox, where one personal account is
+  the pipeline *and* the human — it returned an empty thread on every second
+  pass. Both `applyMutation`s sign; `selfAccountId` and `/myself` are gone.
 - **Test hygiene.** `npm test` globbed only `packages/shared`, so 19 agent tests
   never ran; the glob now covers `services/*` too. Separately, the whole stale
   `dist/` went, taking 14 phantom tests with it — the suite went 68 → 54 → 77.
@@ -248,29 +258,185 @@ human moves it through the board with zero collision.
 This supersedes an earlier suggestion in this session that the refiner should
 have a terminal "hand off to a human developer" status. It should not.
 
-### 4. The refiner needs a vocabulary for handing back
+### 4. There is one hand-back, and it carries a confidence and a size — IMPLEMENTED
 
-`RefineOutcome` is currently exactly two things
-([`types.ts:188`](../packages/shared/src/types.ts)):
+> Settled and in the code. The original framing — "the refiner needs a
+> vocabulary for handing back", meaning new `RefineOutcome` variants for
+> *not enough detail* and *too large* — was **the wrong shape**, and the
+> reasoning it was built on is what gave it away. It had already noticed that
+> both cases are the same board gesture as a success: publish, comment, move to
+> `Refinement Review`, human decides. An enum whose variants all do the same
+> thing is not a vocabulary; the thing that actually needed a vocabulary is the
+> **story**, which is what a human reads.
 
-```
-succeeded { refined }   |   failed { reason, retryable }
-```
+`RefineOutcome` stays two variants — "here is the story" or "I crashed". What
+was missing is not an outcome the pipeline branches on but two facts the model
+knows and never wrote down:
 
-"Here's your story" or "I crashed." Two real cases fit neither:
+- **Confidence** — how sure the refiner is that this story is what the requester
+  wants. Low means it had to guess at something material, and the guess is in
+  the story.
+- **Story points** — the size of the work, on the fibonacci scale. Above 13 is
+  not a story; it is told to say 13, describe the natural split in one line, and
+  propose it as a question.
 
-- **Not enough detail to proceed.** Not a failure, and retrying will not help —
-  it needs a human to add information.
-- **Enough detail, but the effort is too large.** The output is a proposed
-  breakdown, not a story.
+Both go in the prose, in a closing `## Estimate` section. Neither blocks
+anything and nothing machine-reads them — `decide()` is still content-blind.
+They exist so the human at gate 1 can tell a confident story from a plausible
+one without re-deriving the ticket, which is the judgement that was previously
+being asked of the outcome enum and could never have been answered by it.
 
-Both are gate 1: comment on the ticket, move to `Refinement Review`, human acts.
-That loop already exists — the human sends it back with the changes-requested
-label, which re-dispatches the refiner
-([`pipeline.ts:262`](../packages/shared/src/pipeline.ts)). What is missing is
-the outcome variant and the fact that today the ticket would look identical to a
-successful refinement; the human only learns the difference by reading the
-comment.
+**The prose is the spec, and only the spec.** It is what the implementer builds
+and what the reviewer tests against, so everything in it reads as a requirement.
+The conversation about the ticket — open questions, the human's answers, what
+was asked last pass — stays out of it and lives in comments. A story that
+accumulates its own negotiation makes every downstream reader demultiplex the
+requirements from the history of how they were arrived at.
+
+**Questions go through `ask_human`, a buffered tool.** Intent-shaped, per
+decision 8, so the move to MCP re-implements a body and changes no prompt. It is
+a tool rather than a separator convention in the prose because a separator puts
+a parser back on the path decision 1 took one off, and it fails toward
+publishing the questions into the spec. It is buffered because **nothing may
+write before the lane guard** — the questions accumulate in memory and the
+caller posts them as a single comment, in the same `applyMutation` that moves
+the card, after consent has been re-checked.
+
+The refiner never splits a ticket, only proposes a split. Deciding one ticket
+becomes three is a human act, same as decision 3.
+
+#### Rehydration: how a second pass knows anything
+
+The refiner keeps no state. A second pass is reconstructed entirely from the
+ticket, and nothing counts the passes — a human may have edited any part of it
+in between, so the ticket *is* the state:
+
+- **The description is the previous story.** A send-back is a column move; it
+  does not touch the description. So `draftDescription` on a second pass is the
+  refiner's own last output, possibly with human edits on top, and the prompt
+  says improve it rather than start over.
+- **The comment thread is the conversation**, and the trigger for reading it is
+  the one already in the watcher: draft column + agent lane, which covers a
+  first pass and a send-back identically.
+- **A prior pass is detected by an agent comment in that thread**, not by the
+  thread being non-empty. A human adding context to a brand-new ticket must not
+  make the refiner think it wrote the description.
+
+One thing this broke and fixed: `getHumanComments` filtered out the pipeline's
+own comments, so answers would have come back with the questions removed —
+"yes, use the existing one" attached to nothing. It is now `getConversation`,
+returning the recent thread **tagged** `agent` / `human`, oldest first. Tagging
+preserves what the filter was for (the pipeline's own findings must not read
+back as if a person wrote them) without discarding the half that makes a reply
+legible. Jira issue comments are flat, so order plus authorship is the only
+pairing available. `TicketSnapshot.reviewerComments` and
+`RefineWorkItem.reviewerComments` are gone; both are `conversation:
+TicketComment[]`.
+
+#### The pipeline signs its comments; it does not infer authorship
+
+The tag comes from a signature in the text — `AGENT_COMMENT_SIGNATURE`, appended
+by both `applyMutation` implementations, matched by `isAgentComment`
+([`comments.ts`](../packages/shared/src/comments.ts)). The author account is not
+consulted, and the `/rest/api/3/myself` lookup and `selfAccountId` cache are
+gone with it.
+
+**The author account was not a weak signal, it was an inverted one.** The
+pipeline has one Jira identity and nothing says it is not also a person's — in
+the sandbox that is exactly the setup, one personal account for the watcher, the
+agents, and the human reviewing their work. Under it, `author === self` is true
+for *every* comment on the ticket: the original filter therefore returned an
+empty thread every time, and the tagged version that replaced it would have
+labelled the human's own answers as the agent talking to itself. Both fail in
+the environment this is actually being developed in, and neither fails loudly.
+
+A signature is true wherever it is read, whoever posted it, and it does one more
+thing the account check could not: on a board where the pipeline posts under a
+person's account, it tells that person which comments are theirs. It is a plain
+em-dashed line, the sort that ends a note anyway — prose, not syntax, per
+decision 1 — and if a human strips it, one comment reads as human, which is the
+gentle direction.
+
+Sign at the write path, never at the caller. Both `applyMutation`s sign, so
+every pipeline comment carries it: the refiner's questions today, the reviewer's
+findings and the watcher's own notes when those land.
+
+The 20-comment cap is taken from the newest end, so a long-lived ticket loses
+its oldest exchanges — the settled ones — first.
+
+Also resolved, because it was waiting on this decision: **an empty story from
+the model throws** rather than handing back. A refiner with no story has nothing
+to publish and nothing for a human to review; the throw leaves the SQS message
+for redelivery, which re-runs the exploration, and the redrive policy bounds it.
+
+#### What the live run showed, and the three prompt rules it bought
+
+Run against KAN-6 and KAN-7 on the deployed stack. The mechanism worked on the
+first try — signed comment, ADF round trip, thread read back, answers folded in.
+The model's *judgement* is what needed work, and each fix below came from a real
+observed failure. All are in `DEFAULT_SYSTEM_PROMPT`; none required a code change.
+
+1. **It wrote a chat preamble into the spec.** KAN-7's description opened with
+   "The repo is confirmed empty... Here is the refined story." The rule added:
+   the entire output is the description, start at the first heading, nothing
+   addressed to a reader. Fixed on the next run and has not recurred.
+2. **It would not ask.** Three consecutive runs called `ask_human` zero times.
+   KAN-6's draft said "app" without saying what kind, and the model resolved
+   CLI-vs-HTTP-service itself. `ask_human` was verified working by a probe
+   ticket that was genuinely unanswerable, so this was threshold, not wiring.
+   The rule added draws the line at **how versus what**: framework, layout and
+   port defaults are the refiner's; anything that changes what the finished
+   thing *is* belongs to the requester, who is one comment away. Plus the cost
+   argument — a question costs one reply before any code exists, a wrong guess
+   costs an implementation and a second ticket to undo it.
+3. **A guess became a requirement on the next pass — the important one.** Having
+   chosen "CLI" on pass 1, pass 2 read its own story back and reported
+   `Confidence: high — the stdout-CLI scope is already decided and documented in
+   the ticket`. It was: the refiner had written it there. The description is the
+   only state, so an unmarked guess is indistinguishable from a requirement
+   forever after. Hence **`## Assumptions`**, listing what the refiner decided on
+   the requester's behalf, and confidence being a function of that list rather
+   than only of whether a question was asked.
+
+**The `## Assumptions` rule does not repair a ticket that was already laundered**
+— re-running KAN-6 over its own polished story produced "Assumptions: None
+material", because nothing in that text says which parts were guesses. It only
+works from a draft a human wrote. KAN-6 had to be reset to its original one-line
+draft to test the loop, after which pass 1 asked the CLI question with
+`Confidence: low`, and pass 2 — given a one-sentence human answer — folded it in
+("it is **not** a web/HTTP service"), re-asked nothing, and moved to
+`Confidence: high — explicitly answered by the requester`, `Story points: 1`.
+
+Two residual flaws, both minor and both unfixed:
+
+- **Answered items linger in `## Assumptions`** ("this was explicitly
+  confirmed"). Once answered, a thing is a requirement and belongs only in the
+  body; the section should shrink as answers arrive rather than become a
+  changelog of them.
+- **The model bundles.** On the probe it packed three distinct questions into a
+  single `ask_human` call, so the comment's numbering does not match the
+  questions. The per-question tool contract is right; the prompt does not yet
+  insist on it.
+
+**Standing down at the lane guard is not a hand-back** and deliberately stays an
+ordinary non-retryable failure. It is the one path where the refiner has
+something to say and no right to say it: the ticket is in the human lane or has
+moved on, and posting a comment would be exactly the write the guard exists to
+stop. The story goes to the log and nowhere else.
+
+**No attempt budget on the refine path, and there is nothing to decide here.**
+The budget exists to break a machine-to-machine loop — the implementer and the
+reviewer can hand work back and forth indefinitely with nobody watching. The
+refine loop has no such edge: every cycle goes refiner → `Refinement Review` →
+**a human moves the card back** → refiner. A person acts between every pass, so
+there is no runaway to stop, and a person who keeps sending a ticket back is
+exercising the same override decision 7 already grants them.
+
+This is already true by construction and should stay that way. `needsHistory`
+([`pipeline.ts:161`](../packages/shared/src/pipeline.ts)) is true only for
+`Changes Requested`, `Code Review` and `Rebase Required`, so `attempts` is never
+populated on a refine tick, and `RefineWorkItem` carries no `attempt` or
+`maxAttempts` at all — unlike both other work items. Do not add them.
 
 ### 5. Agents may review anyone's code; they may only write with consent
 
@@ -348,6 +514,15 @@ already does swap-style mutations, so
 `removeLabels: ['agent-attempt-2'], addLabels: ['agent-attempt-3']` rides along
 on the dispatch that is already happening. No new storage, and the current count
 is visible on the card.
+
+**"The dispatch that is already happening" means the implement and review
+dispatches only.** The counter is the implementer↔reviewer loop's loop-breaker
+and nothing else's. Do not swap the label on a refine dispatch: a human moves
+the card back into a draft column before every refine pass, so there is no
+machine-to-machine cycle to break, and a counter there would only cap how many
+times a person may ask for another pass. The counter must stay off the refine
+path the way it is today — `needsHistory` excludes the draft columns and
+`RefineWorkItem` has no attempt fields. See decision 4.
 
 This also decouples the counter from status transitions, which is now
 *necessary*: a consented fix (decision 5) must **not** consume an attempt. The
@@ -427,6 +602,20 @@ Read this before implementing anything — several of these are subtractions.
 - ~~**`packages/shared/dist/refined-story.*`**~~ — **DONE.** The whole stale
   `dist/` went. It was hiding 14 phantom tests, not the 8 estimated here; the
   suite dropped 68 → 54 before new work took it back up.
+- ~~**`getHumanComments` and `reviewerComments`**~~ — **DONE.** Not deleted but
+  widened, to `getConversation` and `conversation: TicketComment[]`. The version
+  that dropped the pipeline's own comments would have handed a second pass the
+  human's answers with the questions removed. See decision 4.
+- ~~**`selfAccountId` and the `/rest/api/3/myself` lookup**~~ — **DONE.**
+  Deleted. Authorship comes from the pipeline's signature on the comment text,
+  which is the only thing that works when the pipeline's Jira account is also a
+  person's. Do not reintroduce an author check as a second signal: under a
+  shared account it is true for every comment and would re-break what it is
+  meant to reinforce.
+- **A `needs_information` / `too_large` outcome variant.** Considered and
+  rejected — decision 4. Both are the same board gesture as a success, and what
+  distinguishes them belongs in the story a human reads, not in an enum nothing
+  branches on.
 - **Possibly `countAttempts` and `getStatusHistory`**, if the label counter
   (decision 7) fully replaces the changelog basis. Still open — decide
   deliberately rather than leaving two counters. Note `statuses.changesRequested`
@@ -490,16 +679,16 @@ next one is **that dispatch actually landing in a queue**:
    `readManifest` and `findPullRequestForIssue` are implemented and verified
    against the live sandbox; see READ FIRST. What is left before a watcher can
    dispatch for real is `queues.send`, and that needs SQS to exist.
-2. **Then decide the hand-back vocabulary** (decision 4). It was deliberately
-   left until after a successful run, and the run makes the shape clearer: on a
-   nearly-empty repo the model produced a confident story plus a genuine open
-   question about intent. That is the "not enough detail" case arriving as
-   ordinary success, which is exactly the ambiguity decision 4 exists to remove.
-   Standing down at the lane guard is a third case, and today it reports as an
-   ordinary failure.
+2. ~~**Then decide the hand-back vocabulary**~~ — **DONE**, and it turned out
+   not to be a vocabulary; see decision 4. Confidence and size go in the story,
+   open questions go in a comment, and a second pass rehydrates from the ticket.
+   **Verified on the deployed stack**, both passes: KAN-6 asked its question,
+   took a human answer, and folded it in. Three prompt rules came out of that
+   run — read "What the live run showed" before touching the prompt.
 3. **Give the refiner a real repo to read.** Everything so far is one file. The
    step budget, the prompt, and `readPaths` are all untested against a codebase
-   with actual structure.
+   with actual structure. This is also where the `## Estimate` block gets its
+   first honest test: on a one-file repo every story is a 3.
 
 Deploying is not on this path and is still a long way off — Terraform has never
 been applied.

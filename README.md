@@ -128,6 +128,37 @@ rule, enforced consistently, is easier to work with than a clever one.
 Labels are used **only** for signals a human deliberately sends. No pipeline
 state is stored in them — see below.
 
+### Human gate 1: reviewing a refinement
+
+A ticket in `Refinement Review` has the refined story in its **description** and
+nothing else. That story is the spec — it is what the implementer builds and
+what the reviewer tests against — so it holds the work and none of the
+conversation about it. It ends with the refiner's own read on itself:
+
+```
+## Estimate
+
+Confidence: medium — the retention window is a guess; see "Cleanup" above.
+Story points: 5 — one new handler plus its tests, in a module that already exists.
+```
+
+Neither number blocks anything. They are there so you can tell a confident story
+from a plausible one without re-deriving the ticket yourself. Anything the
+refiner could not settle is a **comment**, numbered, not in the story.
+
+Everything the pipeline writes is signed with a `— cloud-harness` line. That is
+how the refiner tells its own questions from your answers when it reads the
+thread back, and it is not decoration: the pipeline has one Jira account, and if
+you point it at your own, the board is otherwise a conversation with yourself.
+
+To answer: reply in the comments and move the ticket back to a draft column
+(`Backlog` / `To Do`), still in the agent lane. That re-dispatches the refiner,
+which reads the whole thread, folds your answers into the story as though they
+had always been in the draft, and moves it back to `Refinement Review`. Editing
+the description yourself works too — move to the human lane first, then back.
+
+To approve, move it to `Ready for Implementation`.
+
 ### The attempt budget is derived, not stored
 
 Nothing writes a counter anywhere. The budget is computed from the Jira

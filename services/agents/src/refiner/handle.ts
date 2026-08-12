@@ -29,6 +29,25 @@ import { createAgentModel } from '../runtime/model.js';
 import { cleanupWorkspace, prepareWorkspace } from '../runtime/workspace.js';
 import { refine } from './refine.js';
 
+/**
+ * The open questions, as the comment a human answers by replying.
+ *
+ * Kept plain on purpose. The reply route is "comment back on the ticket" and
+ * nothing parses what comes back — the next pass gets the whole thread, tagged
+ * by author, and reads it. Numbering is for the human's convenience in saying
+ * "1: yes, 2: use the existing queue"; it is not a protocol.
+ */
+function questionComment(questions: string[]): string {
+  return [
+    'I refined this as far as I could and left the story in the description.',
+    'These are the things I could not settle. Reply here with anything you want',
+    'answered, then move the ticket back to a draft column and I will fold your',
+    'answers into the story.',
+    '',
+    ...questions.map((question, i) => `${i + 1}. ${question}`),
+  ].join('\n');
+}
+
 export async function handleRefine(
   ctx: AgentTaskContext<RefineWorkItem>,
 ): Promise<RefineOutcome> {
@@ -61,6 +80,7 @@ export async function handleRefine(
     log.info('refinement drafted', {
       exhaustedSteps: result.exhaustedSteps,
       readPaths: result.readPaths,
+      questions: result.questions.length,
     });
 
     // The lane guard. Consent is re-checked here rather than trusted from
@@ -95,11 +115,23 @@ export async function handleRefine(
       };
     }
 
-    // Story first, column second. A failure between the two leaves the ticket
-    // in Refining with a good description, and the redelivered item rewrites it
-    // and transitions — wasteful but correct.
+    // Story first, then the questions and the column. A failure between them
+    // leaves the ticket in Refining with a good description, and the redelivered
+    // item rewrites it and transitions — wasteful but correct.
+    //
+    // There is one hand-back, and this is it, whether the model was confident or
+    // was guessing. The board gesture is identical because the human's job is
+    // identical: read it and decide. What varies is what they read — the story
+    // carries its own confidence and size, and anything the refiner could not
+    // settle is in the comment below. See HANDOFF decision 4.
     await jira.publishRefinement(item.issueKey, result.story);
-    await jira.applyMutation(item.issueKey, { status: pipeline.statuses.refinementReview });
+    await jira.applyMutation(item.issueKey, {
+      // One comment, not one per question. It is a single hand-back and reads as
+      // one, and applyMutation posts it before it transitions, so the card
+      // arriving in Refinement Review already has the questions attached.
+      ...(result.questions.length > 0 ? { comment: questionComment(result.questions) } : {}),
+      status: pipeline.statuses.refinementReview,
+    });
 
     return { status: 'succeeded', refined: result.story };
   } finally {

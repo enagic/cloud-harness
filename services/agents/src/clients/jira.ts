@@ -13,6 +13,7 @@
  */
 
 import {
+  signAgentComment,
   textToAdf,
   type JiraConfig,
   type Logger,
@@ -139,10 +140,14 @@ export class JiraWriter {
       });
     }
 
+    // Signed on the way out. The refiner reads this thread back on its next
+    // pass and has to tell its own questions from the answers; it cannot do that
+    // from the author account, which may be the same person's. See
+    // isAgentComment.
     if (mutation.comment) {
       await this.request(`/rest/api/3/issue/${key}/comment`, {
         method: 'POST',
-        body: { body: textToAdf(mutation.comment) },
+        body: { body: textToAdf(signAgentComment(mutation.comment)) },
       });
     }
 
