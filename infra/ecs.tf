@@ -47,8 +47,8 @@ locals {
     { name = "STATUS_DONE", value = var.jira_statuses.done },
     { name = "STATUS_FAILED", value = var.jira_statuses.failed },
 
-    { name = "LABEL_REFINE", value = var.jira_labels.refine },
-    { name = "LABEL_CHANGES_REQUESTED", value = var.jira_labels.changes_requested },
+    { name = "STATUS_DRAFT", value = join(",", var.jira_draft_statuses) },
+    { name = "LABEL_AGENT", value = var.jira_agent_label },
 
     { name = "MAX_IMPLEMENTATION_ATTEMPTS", value = tostring(var.max_implementation_attempts) },
   ]

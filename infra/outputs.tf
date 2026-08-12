@@ -99,8 +99,9 @@ output "jira_workflow" {
     the Jira board — transitions are resolved by name.
   EOT
   value = {
-    statuses = var.jira_statuses
-    labels   = var.jira_labels
+    statuses       = var.jira_statuses
+    draft_statuses = var.jira_draft_statuses
+    agent_label    = var.jira_agent_label
   }
 }
 

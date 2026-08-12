@@ -79,24 +79,22 @@ export interface RefineWorkItem extends WorkItemBase {
   reviewerComments?: string[];
 }
 
-/** What the refiner produces, before a human sees it. */
-export interface RefinedStory {
-  title: string;
-  description: string;
-  acceptanceCriteria: string[];
-  /**
-   * Files, modules, and prior art the refiner found in the repo. This is the
-   * point of giving the refiner repo access: the implementer should not have
-   * to rediscover where the work belongs.
-   */
-  codeContext: {
-    relevantPaths: string[];
-    notes: string;
-  };
-  /** Questions the refiner could not resolve; surfaced to the human reviewer. */
-  openQuestions: string[];
-  estimate?: string;
-}
+/**
+ * What the refiner produces is prose, so there is no type here — just a string.
+ *
+ * There was a structured `RefinedStory` (title, acceptanceCriteria[],
+ * codeContext, openQuestions[]). It is gone deliberately. The story lives in the
+ * Jira description, where a human reads it at gate 1 and may edit it before an
+ * agent sees it again, and a ticket has to stay interchangeable between the two.
+ * A machine format makes the description the agent's private scratch space and
+ * makes the human's edit either awkward or silently ignored.
+ *
+ * Nothing in this system needs it parsed. `decide()` routes on status, labels
+ * and attempts and never reads the description; everything else that consumes
+ * the story is a model, and models read prose. Structure is still welcome —
+ * headings, bullets, a table — as conventional structure a human would write
+ * anyway, not as a grammar that breaks when someone edits around it.
+ */
 
 // ---------------------------------------------------------------------------
 // Implementer
@@ -114,10 +112,12 @@ export interface ImplementWorkItem extends WorkItemBase {
   agent: 'implementer';
   reason: ImplementReason;
 
-  /** The approved story — the actual spec. */
+  /**
+   * The approved story — the actual spec, as prose. Acceptance criteria and the
+   * repository paths the refiner found are part of this text, not separate
+   * fields; see the note above RefineWorkItem's neighbours.
+   */
   refinedDescription: string;
-  acceptanceCriteria: string[];
-  relevantPaths: string[];
 
   /** 1-based. Incremented only for `changes_requested`. */
   attempt: number;
@@ -138,9 +138,8 @@ export interface ImplementWorkItem extends WorkItemBase {
 export interface ReviewWorkItem extends WorkItemBase {
   agent: 'reviewer';
 
-  /** The story the implementation is meant to satisfy. */
+  /** The story the implementation is meant to satisfy, as prose. */
   refinedDescription: string;
-  acceptanceCriteria: string[];
 
   branch: string;
   pullRequestUrl: string;
@@ -185,7 +184,7 @@ export type WorkItem = RefineWorkItem | ImplementWorkItem | ReviewWorkItem;
 // ---------------------------------------------------------------------------
 
 export type RefineOutcome =
-  | { status: 'succeeded'; refined: RefinedStory }
+  | { status: 'succeeded'; refined: string }
   | { status: 'failed'; reason: string; retryable: boolean };
 
 export type ImplementOutcome =

@@ -1,54 +1,95 @@
-# Handoff — 2026-08-11
+# Handoff — 2026-08-12
 
-A design session. One line of code changed; the rest is decisions that were
-previously either open or made silently by an earlier session without a
-discussion. Delete this file once the work it describes lands.
+The refiner is written. It is one unimplemented method away from running end to
+end on a real ticket. Delete this file once that has happened and the decisions
+below have landed.
 
-**Nothing below is implemented.** The decisions are settled, the code does not
-reflect them yet. Read "What these decisions delete" before writing anything —
-several of them remove work rather than add it.
+## READ FIRST
 
-## What changed this session
+**1. Everything is uncommitted.** 19 modified files, nothing staged. `npm test`
+is **77/77** and `tsc --build` is clean, so it is a sound commit whenever you
+want one. Do not start by reverting anything.
 
-| Area | State |
-|---|---|
-| `packages/shared/src/config.ts` | **`boolEnv` added.** Unblocked the build |
-| Refined-story format (was open decision #2) | **Settled: prose.** Not fenced JSON |
-| Agent label semantics | **Changed:** standing consent, not a one-shot trigger |
-| Attempt counter | **Moving** from status changelog to labels |
-| Atlassian access | **Going behind tools**, agent side only |
-| Fixer agent | **Ruled out.** The implementer already is one |
+**2. Two lost source files survive only as pinned git refs.** They were written
+by an earlier session, never committed, and existed only as dangling blobs that
+`git gc` would eventually prune. They are now pinned:
 
-## The build was broken; it isn't now
+```
+git cat-file -p refs/recovered/bitbucket-client-with-clone   # USE THIS
+git cat-file -p refs/recovered/refine-structured-rejected    # reference only
+```
 
-`services/agents/src/runtime/model.ts` imported `boolEnv` from
-`@cloud-harness/shared`, which did not exist — only `requireEnv`,
-`optionalEnv`, and `intEnv`. Since `npm test` builds first, one missing export
-was blocking the entire suite.
+The first implements `BitbucketClient.clone` and is the immediate next step —
+see below. The second is a `refine.ts` built on the rejected fenced-JSON format;
+it does not compile against the current tree and is kept only as a record.
 
-Added at [`config.ts`](../packages/shared/src/config.ts), following `intEnv`'s
-idiom: it throws on an unrecognised value rather than quietly treating it as
-false. A flag that reads "yes" as off is worse than one that refuses to start.
-It reaches the agents through the existing `export * from './config.js'`.
+**3. Do not state sandbox ticket state from this file.** It goes stale in hours.
+A previous session claimed a relabelling was outstanding when the user had
+already done it. Query Jira — the dry run at the bottom prints the live board.
 
-`npm test` is now **68/68 passing**.
+## Where the refiner actually is
 
-## A lost file you should not recover
+Six steps. Five are written:
 
-`packages/shared/src/refined-story.ts` does not exist. Its compiled output
-does — `packages/shared/dist/refined-story.js` and `.test.js`, timestamped
-2026-08-10 16:45. `dist/` is gitignored and the source was **never committed**,
-so there is no commit to restore from.
+| # | Step | State |
+|---|---|---|
+| 1 | Clone the repo | **STUB — the only blocker** |
+| 2 | Read the repo, write the story | Done — AI SDK tool loop, `refine.ts` |
+| 3 | Re-check the ticket is still ours | Done — the lane guard |
+| 4 | Write the story into the description | Done — `publishRefinement` |
+| 5 | Move the card to `Refinement Review` | Done — `applyMutation` |
+| 6 | Report the outcome | Done for the happy path |
 
-Because the test script runs `node --test "packages/shared/dist/**/*.test.js"`,
-eight `renderRefinedStory` / `parseRefinedStory` tests in that 68 are executing
-stale compiled JS with no source behind it. `tsc --build` does not remove
-orphaned outputs, which is why nothing complained.
+`BitbucketClient.clone` throws `not implemented`. It is an intentional stub, not
+a fault — nothing has ever reached it.
 
-It implemented the fenced-JSON format. **That approach was rejected this
-session** — see decision 1. Delete the stale artifacts rather than
-reconstructing the source. The last session built it without having the
-discussion; this session had the discussion and went the other way.
+### Next step: restore `clone`
+
+`refs/recovered/bitbucket-client-with-clone` implements it, and it was checked
+against the current tree: `runCommand` from `runtime/exec.ts` matches, and
+`BitbucketConfig.role` / `.email` both exist with the semantics it assumes. It
+is better than an obvious first attempt in four ways worth preserving:
+
+- The token goes through a throwaway **`GIT_ASKPASS`** script, never the URL —
+  so it stays out of `.git/config`, `git remote -v`, and the process list.
+- Handles **both** current credential types: access token authenticates as
+  `x-token-auth`, Atlassian API token as the email. App passwords were removed
+  in July 2026.
+- **Shell-quotes** the branch name, which comes off a human-influenced work item
+  and reaches `bash -lc`.
+- A **`depth`** option, with the reason: the refiner only reads and wants
+  `--depth 1`; anything that rebases needs full history to replay commits.
+
+Only `clone` is implemented in that file — push, PR lifecycle and rebase are
+still stubs there too. Restore it, keep the rest as stubs, then run the refiner
+against KAN-6.
+
+## What landed this session
+
+- **The refined story is prose** (decision 1). `RefinedStory` deleted;
+  `RefineOutcome.succeeded` carries a string. `parseRefinedStory` deleted from
+  the watcher rather than implemented — it was already a passthrough returning
+  empty arrays.
+- **Two lanes, one label** (decision 2, rewritten below). `LABEL_REFINE` and
+  `LABEL_CHANGES_REQUESTED` replaced by a single `LABEL_AGENT` (`agent`), plus a
+  new `STATUS_DRAFT` allowlist. Verified against live Jira.
+- **Agents move their own cards.** The "watcher owns all status mutations" half
+  of decision 2 was struck — see the note there before rebuilding it.
+- **The agent-side Jira write path**, mirroring the watcher's verified client:
+  `request`, `readLaneState`, `publishRefinement`, `applyMutation`,
+  `transitionTo`.
+- **Test hygiene.** `npm test` globbed only `packages/shared`, so 19 agent tests
+  never ran; the glob now covers `services/*` too. Separately, the whole stale
+  `dist/` went, taking 14 phantom tests with it — the suite went 68 → 54 → 77.
+
+## Do not rebuild these
+
+- **A results queue or any agent→watcher outcome channel.** Considered and
+  rejected: agents move their own cards behind the lane guard. See decision 2.
+- **`packages/shared/src/refined-story.ts`** and the fenced-JSON format. See
+  decision 1 and `refs/recovered/refine-structured-rejected`.
+- **`parseRefinedStory`.** Deleted deliberately; the watcher carries the
+  description and never parses it.
 
 ## Decisions made this session
 
@@ -76,37 +117,66 @@ something a human writes anyway and a model reads for free; a parser's grammar
 breaks the moment someone edits around it. This document is the intended model:
 prose a person would write, structured enough that a machine gets oriented fast.
 
-### 2. The agent label is standing consent, not a trigger
+### 2. Two lanes, one label — IMPLEMENTED
 
-Today the label is self-consuming: dispatching the refiner removes it in the
-same mutation ([`pipeline.ts:349`](../packages/shared/src/pipeline.ts)). It is a
-doorbell. Nothing downstream ever checks for it again.
+> Settled in a later session and now in the code. The earlier framing here was
+> "standing consent, and rename the label"; what it became is a **lane model**,
+> which answers the question that framing left open — when may a human edit?
 
-It becomes a flag that persists and is checked before **every** dispatch. No
-label, no agent. `decide()` gains an early guard and the pipeline turns into
-opt-in at every stage rather than opt-in at the front door.
+`LABEL_REFINE` and `LABEL_CHANGES_REQUESTED` are both gone, replaced by a single
+`LABEL_AGENT` (default `agent`). Present, the ticket is in the **agent lane**;
+absent, it is in the **human lane** and nothing is dispatched at any stage.
 
-The label should also be renamed to something generic — not `agent-refine`.
-Per-stage labels are unnecessary because **the board column already says which
-stage to run**: label + `To Do` means refine, label + `Code Review` means
-review. Status carries the stage, the label carries the consent.
+The label is consent, not a doorbell. It is checked before every dispatch and
+never consumed. The board column says which stage to run; the label says whether
+to run at all. Per-stage labels were never necessary: label + a draft column
+means refine, label + `Code Review` means review.
 
-Two consequences that are easy to miss:
+**A ticket may change lanes at any point in its lifecycle, and the pipeline
+assumes nothing about when.** There is no designated edit window. The protocol
+is: move to the human lane, edit, move back.
 
-- **The "checked last" defence inverts.** The comment at
-  [`pipeline.ts:346`](../packages/shared/src/pipeline.ts) explains that kickoff
-  runs last so a lingering label cannot pull a ticket backwards. That assumes a
-  lingering label is a mistake. Under this model it is the normal state, so the
-  kickoff branch must become *label present **and** ticket is in a draft
-  status*. Otherwise any board column the state machine does not recognise — and
-  a real kanban board will have some — falls through to kickoff and re-refines
-  on every tick.
-- **Mid-flight removal still collides.** A human pulls the label while the
-  refiner is running. Nothing new dispatches, but the running agent finishes and
-  applies its own terminal mutation, yanking the ticket out from under the
-  person who just took it over. Fix: **the watcher owns all status mutations**
-  and agents only report outcomes. That fits the existing shape, since the
-  watcher is already the only thing that transitions tickets on dispatch.
+**Editing in the agent lane forfeits the edit.** If a human changes the story
+while an agent is refining it, the agent's write wins. The human course-corrects
+and learns the rule. The alternative — agents backing off whenever a description
+changed under them — makes every write a negotiation and the pipeline
+unpredictable. One rule enforced consistently beats a clever one.
+
+Three consequences, all handled:
+
+- **The "checked last" defence inverted, as predicted.** Kickoff used to run
+  last so a lingering label could not pull a ticket backwards; under a
+  persistent label that lingering state is normal. Kickoff now tests *label
+  present **and** ticket in a draft column* — hence the new `draftStatuses`
+  allowlist (`STATUS_DRAFT`, default `Backlog,To Do`). Without it, any column
+  this state machine does not recognise would re-refine on every tick.
+- **Gate 1 lost its label and gained a column.** Sending a story back was the
+  changes-requested label; it is now moving the card to a draft column, which
+  falls through to kickoff. One label cannot carry both the lane and the
+  verdict, and the board already distinguishes them. `getHumanComments` now
+  keys on *draft column + agent lane* rather than on the old label, which
+  covers a first pass and a send-back identically — a first pass just finds no
+  comments.
+- **Mid-flight removal still collides**, and `decide()` cannot fix it: removing
+  the label stops the *next* dispatch but the running agent is already gone. It
+  stands down at its own **write guard**, re-reading the lane and column
+  immediately before it writes. **Implemented** in the refiner.
+
+> **Struck: "the watcher owns all status mutations."** That was this decision's
+> proposed fix for the mid-flight collision, and the write guard solves the same
+> problem at the source. Owning transitions centrally would have required a
+> return channel from agent to watcher — a results queue or an inference scheme,
+> neither of which exists — to convey something the agent already knows. It is
+> also not a privilege boundary: publishing the story already requires editing
+> the ticket, so transitioning it is not a bigger grant.
+>
+> **Agents move their own cards, behind the lane guard.** The watcher keeps
+> owning the dispatch transition, which it already did. Do not rebuild the
+> return path; it was considered and rejected deliberately.
+
+What landed: `PipelineLabels.agentLane`, `PipelineConfig.draftStatuses`, the
+lane guard at the top of `decide()`, the draft-column kickoff test, and the
+config/Terraform/README surfaces. Four new tests cover the lane; 77 passing.
 
 ### 3. Leaving the pipeline is a human act
 
@@ -291,30 +361,32 @@ worth doing on its own merits.
 
 Read this before implementing anything — several of these are subtractions.
 
-- **`parseRefinedStory`** ([`work-items.ts:41`](../services/watcher/src/work-items.ts))
-  — delete it, do not implement it. The watcher stops pretending to understand
-  the ticket and just carries it.
-- **`acceptanceCriteria: string[]` and `relevantPaths: string[]`** on
-  `ImplementWorkItem` and `ReviewWorkItem` — they collapse into the description
-  the agent reads.
-- **`removeLabels: [labels.refine]`** on the kickoff dispatch
-  ([`pipeline.ts:352`](../packages/shared/src/pipeline.ts)) — the label must
-  survive.
-- **`packages/shared/dist/refined-story.*`** — stale artifacts of a rejected
-  approach.
+- ~~**`parseRefinedStory`**~~ — **DONE.** Deleted, not implemented. The watcher
+  stops pretending to understand the ticket and just carries it.
+- ~~**`acceptanceCriteria` and `relevantPaths`**~~ on `ImplementWorkItem` and
+  `ReviewWorkItem` — **DONE.** Collapsed into `refinedDescription`. The
+  structured `RefinedStory` went with them; it is a string now.
+- ~~**`removeLabels: [labels.refine]`**~~ on the kickoff dispatch — **DONE.**
+  The label survives dispatch, and a test pins that it does.
+- ~~**`packages/shared/dist/refined-story.*`**~~ — **DONE.** The whole stale
+  `dist/` went. It was hiding 14 phantom tests, not the 8 estimated here; the
+  suite dropped 68 → 54 before new work took it back up.
 - **Possibly `countAttempts` and `getStatusHistory`**, if the label counter
-  fully replaces the changelog basis. Decide deliberately rather than leaving
-  two counters.
+  (decision 7) fully replaces the changelog basis. Still open — decide
+  deliberately rather than leaving two counters. Note `statuses.changesRequested`
+  is untouched by the label deletion in decision 2; only the *label* went.
 
 ## Still open
 
+- **Early abort on the heartbeat.** The write guard is in, but it fires only at
+  the end: a run whose ticket left the agent lane in minute one still burns the
+  whole model call before discovering it. `ctx.onProgress()` already runs on a
+  timer and `ctx.signal` already reaches `generateText`, so checking the lane
+  there would abort early. Throttle it — the heartbeat fires after every tool
+  call, and that is a Jira GET each time.
 - **Does the refiner create child tickets when it recommends a split, or only
   propose the breakdown in a comment?** It has no Jira issue-creation path
   today, and this is a write-permission question as much as a workflow one.
-- **The generic label name.** `agent-refine` is going away; what replaces it is
-  unchosen. Note `LABEL_REFINE` in config and the `refine` field on
-  `PipelineLabels` both rename with it. The changes-requested label is a
-  separate thing and stays.
 - **Whether a consented fix gets its own `ImplementReason` or reuses
   `changes_requested`** with a flag. Leaning toward its own, since it must not
   consume an attempt.
@@ -325,13 +397,20 @@ Read this before implementing anything — several of these are subtractions.
 
 ## Needs verifying against the sandbox
 
-Both are cheap with the credentials already in hand, and both are things this
-session asserted from reasoning rather than observation. The preflight harness
-is the natural place for them.
+All cheap with the credentials already in hand, and all asserted from reasoning
+rather than observation. The preflight harness is the natural place for them.
 
 1. **Does Jira's changelog record label changes** with author and timestamp?
    Decision 7 leans on this.
-2. **How to find a human-authored PR for a ticket.** Atlassian links branches,
+2. **Does the issue history retain the previous description** after an edit?
+   The lane rule says a human who edits in the agent lane loses that edit, and
+   the justification for being relaxed about it is that Jira keeps the old value.
+   Nothing has checked that.
+3. **Is there any conditional-update mechanism on `PUT /rest/api/3/issue/{key}`?**
+   The lane guard is check-then-write and therefore not atomic; the assumption
+   is that Jira offers no `If-Match`/ETag equivalent. If one exists, the guard
+   could close its remaining race entirely.
+4. **How to find a human-authored PR for a ticket.** Atlassian links branches,
    commits and PRs to an issue when the key appears in the name, message or
    title — that part is standard. The question is how to read it back. The
    `dev-status` endpoint is widely used but effectively internal and only works
@@ -348,17 +427,24 @@ at code review" does not work until this is solved.
 
 ## Suggested next step
 
-Unchanged in spirit: a **refiner-only vertical slice**, one agent working end to
-end on a real ticket. The uncommitted work already covers the model seam
-(`runtime/model.ts`) and the repo tools (`refiner/repo-tools.ts`).
+Still the **refiner-only vertical slice** — one agent working end to end on a
+real ticket — and it is now one method away. In order:
 
-What this session changed about it: the refiner now needs a prose renderer
-rather than a JSON serialiser, a hand-back vocabulary (decision 4), and its Jira
-writes shaped as intent-level tools (decision 8). The subtractions in "What
-these decisions delete" should land first — they make the slice smaller.
+1. **Restore `clone`** from `refs/recovered/bitbucket-client-with-clone`. See
+   "Next step" at the top for what is worth preserving in it.
+2. **Run the refiner against KAN-6.** The dry run at the bottom already confirms
+   the watcher would dispatch it. Expect the first real failures to be in
+   territory nothing has exercised yet: the clone itself, and the Jira
+   transition — `resolveStatusIds` only checks that statuses *exist*, so no
+   ticket has ever actually moved (see Gotchas).
+3. **Then decide the hand-back vocabulary** (decision 4). It was deliberately
+   left until after a successful run, because a real refinement makes it obvious
+   which cases matter. Standing down at the lane guard is a third case alongside
+   the two in decision 4, and today it reports as an ordinary failure.
 
-The label semantics (decision 2) are watcher work and can be done in parallel;
-they are self-contained and well covered by the existing state machine tests.
+Not on the critical path, and fine to leave: the attempt counter moving to
+labels (decision 7), the Atlassian tool shapes (decision 8), and everything
+about the implementer and reviewer.
 
 ## Decisions from earlier sessions that still hold
 
@@ -391,8 +477,11 @@ they are self-contained and well covered by the existing state machine tests.
   written to disk: `export JIRA_API_TOKEN="$ATLASSIAN_PAT"`.
 - **A ticket in `Refining` / `Implementing` / `Reviewing` is treated as
   in-flight** and idles forever. That status is the watcher's own receipt, not a
-  request. Kickoff is the label on a draft ticket. KAN-4 and KAN-5 were stuck
-  this way; KAN-6 is staged as `To Do` + `agent-refine`.
+  request. Kickoff is the label on a ticket in a draft column.
+- **Do not state sandbox ticket state from this file.** It goes stale within
+  hours and a previous session asserted a relabelling was outstanding when the
+  user had already done it. Query Jira — the dry run below prints the board and
+  what the state machine would do with it.
 - **Workflow transitions are unverified.** `resolveStatusIds` only checks that
   statuses *exist*. The user confirmed no transition restrictions were
   configured, but nothing has actually moved a ticket yet.
@@ -408,6 +497,13 @@ they are self-contained and well covered by the existing state machine tests.
 This dry-run prints what the watcher *would* do against the live board. It was
 useful enough to keep, but was never promoted out of scratch — the user declined
 an `npm run dryrun` script.
+
+Last run after the lane change, and the lane model is confirmed end to end
+against real Jira, not just unit tests:
+
+```
+KAN-6   [To Do    ] labels=["agent"]  dispatch_refine  -> Refining
+```
 
 ```js
 const R = '/Users/mkwon/Code/cloud-harness';

@@ -64,7 +64,8 @@ async function handle(ctx: AgentTaskContext<ReviewWorkItem>): Promise<ReviewOutc
     //
     // TODO:
     //  1. Diff the branch against item.repository.baseBranch.
-    //  2. Review it against item.refinedDescription / acceptanceCriteria.
+    //  2. Review it against item.refinedDescription, which carries the
+    //     acceptance criteria as prose rather than as a separate field.
     //  3. Actually exercise the change:
     //       await prepareRepo(item.runtime.manifest, { cwd: workdir, log, signal })
     //       const test = item.runtime.manifest.testCommand

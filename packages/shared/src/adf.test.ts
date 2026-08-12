@@ -112,27 +112,26 @@ describe('textToAdf', () => {
 });
 
 describe('round trip', () => {
-  // The contract that matters: the refined story rides in a fenced JSON block,
-  // written by the refiner and parsed back by the implementer and reviewer. If
-  // this loses so much as a newline, the agents stop understanding each other.
-  it('preserves a fenced JSON payload exactly', () => {
-    const payload = JSON.stringify(
-      {
-        title: 'Add rate limiting',
-        acceptanceCriteria: ['429 after 100 req/min', 'Retry-After header set'],
-        codeContext: { relevantPaths: ['src/middleware/limit.ts'], notes: 'reuse the redis client' },
-      },
-      null,
-      2,
-    );
-    const original = `## Refined story\n\nSome prose a human might edit.\n\n\`\`\`json\n${payload}\n\`\`\``;
+  // Nothing parses the description any more — the refined story is prose. What
+  // still has to survive byte-exact is quoted code: the refiner points the
+  // implementer at real code from the repository, and whitespace inside a fence
+  // is load-bearing in a way prose around it is not.
+  it('preserves a fenced code payload exactly', () => {
+    const payload = [
+      'export function rateLimit(req: Request): boolean {',
+      '  if (hits(req.ip) > 100) {',
+      '    return false;',
+      '  }',
+      '  return true;',
+      '}',
+    ].join('\n');
+    const original = `## Refined story\n\nSome prose a human might edit.\n\n\`\`\`ts\n${payload}\n\`\`\``;
 
     const recovered = adfToText(textToAdf(original));
-    const fence = /```json\n([\s\S]*?)\n```/.exec(recovered);
+    const fence = /```ts\n([\s\S]*?)\n```/.exec(recovered);
 
-    assert.ok(fence, 'fenced json block survived the round trip');
-    assert.equal(fence[1], payload);
-    assert.deepEqual(JSON.parse(fence[1]!), JSON.parse(payload));
+    assert.ok(fence, 'fenced code block survived the round trip');
+    assert.equal(fence[1], payload, 'indentation and line breaks are unchanged');
   });
 
   it('survives prose around the fence being reflowed', () => {

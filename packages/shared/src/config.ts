@@ -81,9 +81,12 @@ export function loadPipelineConfig(): PipelineConfig {
       failed: requireEnv('STATUS_FAILED'),
     },
     labels: {
-      refine: requireEnv('LABEL_REFINE'),
-      changesRequested: requireEnv('LABEL_CHANGES_REQUESTED'),
+      agentLane: requireEnv('LABEL_AGENT'),
     },
+    draftStatuses: requireEnv('STATUS_DRAFT')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
     maxAttempts: intEnv('MAX_IMPLEMENTATION_ATTEMPTS', 3),
   };
 }

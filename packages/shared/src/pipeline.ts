@@ -49,15 +49,37 @@ export interface PipelineStatuses {
 }
 
 export interface PipelineLabels {
-  /** Human adds this to a drafted ticket to start the pipeline. */
-  refine: string;
-  /** Human adds this to send a refinement back instead of approving it. */
-  changesRequested: string;
+  /**
+   * The lane marker, and the only label the pipeline reads.
+   *
+   * Present, the ticket is in the agent lane; absent, it is in the human lane
+   * and no agent touches it. It is not a trigger — it does not get consumed on
+   * dispatch and it stays on the ticket for as long as the agents are welcome.
+   * The board column says which stage to run; this says whether to run at all.
+   *
+   * A ticket may change lanes at any point in its lifecycle, and the pipeline
+   * assumes nothing about when. To edit a ticket the agents are working on, a
+   * human moves it to the human lane FIRST. Editing while it is still in the
+   * agent lane is a broken contract, and the agent's write wins — see the note
+   * on publishRefinement in services/agents/src/clients/jira.ts.
+   */
+  agentLane: string;
 }
 
 export interface PipelineConfig {
   statuses: PipelineStatuses;
   labels: PipelineLabels;
+  /**
+   * Board columns a ticket is drafted in, before the pipeline has touched it.
+   * The lane label on a ticket in one of these is the kickoff signal.
+   *
+   * An allowlist rather than "any status not listed in PipelineStatuses",
+   * because a real board has columns this state machine has never heard of and
+   * treating those as drafts would re-refine tickets parked in them forever.
+   * Kept out of PipelineStatuses because the pipeline does not own these
+   * columns and never transitions a ticket into one.
+   */
+  draftStatuses: string[];
   /** Review round trips allowed before the ticket is failed for human triage. */
   maxAttempts: number;
 }
@@ -226,13 +248,24 @@ export type PipelineAction =
 /**
  * Given a ticket, decide what the watcher should do about it this tick.
  *
- * Ordering matters: terminal states short-circuit, then in-flight, then human
- * gates, then agent-triggering statuses, then the kickoff label last. A ticket
+ * Ordering matters: the lane check first, then terminal states, then in-flight,
+ * then human gates, then agent-triggering statuses, then kickoff. A ticket
  * sitting in a human gate returns `idle` — the pipeline does nothing until a
  * person moves it.
  */
 export function decide(ticket: TicketSnapshot, config: PipelineConfig): PipelineAction {
-  const { statuses, labels, maxAttempts } = config;
+  const { statuses, labels, draftStatuses, maxAttempts } = config;
+
+  // --- Lane ---------------------------------------------------------------
+  // Checked before anything else, on every tick and at every stage. This is the
+  // whole opt-in: no label, no agent, whatever the board column says.
+  //
+  // It is also how a human takes a ticket back mid-flight. Removing the label
+  // stops the next dispatch immediately, though it cannot stop an agent that is
+  // already running — that one stands down at its own write guard.
+  if (!ticket.labels.includes(labels.agentLane)) {
+    return { kind: 'idle', reason: 'human lane' };
+  }
 
   // --- Terminal -----------------------------------------------------------
   if (ticket.status === statuses.done) {
@@ -256,18 +289,14 @@ export function decide(ticket: TicketSnapshot, config: PipelineConfig): Pipeline
 
   // --- Human gates --------------------------------------------------------
   if (ticket.status === statuses.refinementReview) {
-    // Human gate 1. The human either approves (transitioning the ticket to
-    // readyToImplement, which also resets the attempt budget) or sends it back
-    // by adding the changes-requested label.
-    if (ticket.labels.includes(labels.changesRequested)) {
-      return {
-        kind: 'dispatch_refine',
-        mutation: {
-          status: statuses.refining,
-          removeLabels: [labels.changesRequested],
-        },
-      };
-    }
+    // Human gate 1, and it is purely a wait. The human answers with the board,
+    // not with a label: forward to readyToImplement approves the story (and
+    // resets the attempt budget), back to a draft column sends it round again
+    // via kickoff below.
+    //
+    // There used to be a changes-requested label for the second case. It is
+    // gone: one label cannot carry both the lane and the verdict, and the
+    // column already distinguishes them.
     return { kind: 'idle', reason: 'awaiting human refinement review' };
   }
 
@@ -344,15 +373,17 @@ export function decide(ticket: TicketSnapshot, config: PipelineConfig): Pipeline
   }
 
   // --- Kickoff ------------------------------------------------------------
-  // Lowest priority: a human labelled a drafted ticket. Checked last so a label
-  // left on a ticket that has moved on cannot pull it backwards.
-  if (ticket.labels.includes(labels.refine)) {
+  // A ticket in the agent lane, sitting in a draft column. Two ways to get
+  // here: never refined, or refined and sent back from gate 1 by a human who
+  // moved it out of Refinement Review.
+  //
+  // The draft-column test is what makes this safe now that the label survives
+  // dispatch. The label alone would match a ticket in ANY column this state
+  // machine does not recognise, and re-refine it on every tick forever.
+  if (draftStatuses.includes(ticket.status)) {
     return {
       kind: 'dispatch_refine',
-      mutation: {
-        status: statuses.refining,
-        removeLabels: [labels.refine],
-      },
+      mutation: { status: statuses.refining },
     };
   }
 

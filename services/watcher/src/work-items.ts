@@ -1,8 +1,9 @@
 /**
  * Turns a state machine decision into the work item the target agent consumes.
  *
- * PARTIAL — the structural mapping is real; extracting the refined story out of
- * the ticket is not. See parseRefinedStory below.
+ * The refined story is carried, not parsed. It is prose living in the ticket
+ * description, so the watcher hands it downstream verbatim — this file has no
+ * opinion about what is inside it, and deliberately never gains one.
  */
 
 import {
@@ -22,32 +23,6 @@ export interface WorkItemContext {
   repository: RepositoryRef;
   runtime: RuntimeRef;
   maxAttempts: number;
-}
-
-/**
- * TODO: the refiner writes its output into the ticket, and the implementer and
- * reviewer need it back out in structured form. Options, in preference order:
- *
- *   1. The refiner writes a fenced JSON block into the description under a
- *      known heading; this parses it back. Survives human edits around it and
- *      needs no Jira admin.
- *   2. A Jira custom field holding the JSON. Cleaner, needs project config.
- *   3. Re-derive it with a model call. Wasteful and non-deterministic.
- *
- * Until this is settled, everything downstream gets the raw description and no
- * acceptance criteria, which is enough to run the pipeline end to end but not
- * enough for the agents to be good.
- */
-function parseRefinedStory(ticket: TicketSnapshot): {
-  description: string;
-  acceptanceCriteria: string[];
-  relevantPaths: string[];
-} {
-  return {
-    description: ticket.description,
-    acceptanceCriteria: [],
-    relevantPaths: [],
-  };
 }
 
 export function buildWorkItem(
@@ -78,14 +53,11 @@ export function buildWorkItem(
     }
 
     case 'dispatch_implement': {
-      const story = parseRefinedStory(ticket);
       const item: ImplementWorkItem = {
         ...base,
         agent: 'implementer',
         reason: action.reason,
-        refinedDescription: story.description,
-        acceptanceCriteria: story.acceptanceCriteria,
-        relevantPaths: story.relevantPaths,
+        refinedDescription: ticket.description,
         attempt: action.attempt,
         maxAttempts,
       };
@@ -111,12 +83,10 @@ export function buildWorkItem(
         return undefined;
       }
 
-      const story = parseRefinedStory(ticket);
       const item: ReviewWorkItem = {
         ...base,
         agent: 'reviewer',
-        refinedDescription: story.description,
-        acceptanceCriteria: story.acceptanceCriteria,
+        refinedDescription: ticket.description,
         branch: ticket.branch,
         pullRequestUrl: ticket.pullRequestUrl,
         pullRequestId: ticket.pullRequestId,

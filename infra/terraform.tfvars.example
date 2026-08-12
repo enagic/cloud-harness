@@ -30,12 +30,16 @@ jira_user_email  = "automation@your-org.com"
 #   failed             = "Agent Failed"
 # }
 #
-# Labels are only used for signals a human deliberately sends. No pipeline state
-# is stored in them — the attempt budget is derived from the Jira changelog.
-# jira_labels = {
-#   refine            = "agent-refine"
-#   changes_requested = "agent-changes-requested"
-# }
+# Columns a ticket is drafted in. A labelled ticket in one of these is the
+# kickoff signal, and a story sent back from refinement review returns here.
+# jira_draft_statuses = ["Backlog", "To Do"]
+#
+# The lane marker, and the only label the pipeline reads. Present means the
+# agents own the ticket, absent means a human does. It is standing consent, not
+# a trigger: it is not consumed on dispatch and survives until a human removes
+# it. To edit a ticket the agents are working on, move it to the human lane
+# first — editing it in the agent lane is a broken contract and the agent wins.
+# jira_agent_label = "agent"
 
 # Implementation attempts before a ticket is failed for human triage, counted as
 # transitions into the changes_requested status since the last transition into

@@ -27,9 +27,9 @@ const config: PipelineConfig = {
     failed: 'Agent Failed',
   },
   labels: {
-    refine: 'agent-refine',
-    changesRequested: 'agent-changes-requested',
+    agentLane: 'agent',
   },
+  draftStatuses: ['Backlog', 'To Do'],
   maxAttempts: 3,
 };
 
@@ -42,7 +42,9 @@ function ticket(overrides: Partial<TicketSnapshot> = {}): TicketSnapshot {
     summary: 'Add a thing',
     description: 'Rough draft',
     status: 'Backlog',
-    labels: [],
+    // In the agent lane by default: almost every case below is about a ticket
+    // the pipeline is allowed to touch. The lane guard gets its own tests.
+    labels: ['agent'],
     attempts: 0,
     ...overrides,
   };
@@ -138,26 +140,64 @@ describe('needsHistory', () => {
 // decide()
 // ---------------------------------------------------------------------------
 
+describe('decide — the lane', () => {
+  it('does nothing at any stage while the ticket is in the human lane', () => {
+    // The whole opt-in. Every one of these would be an action in the agent
+    // lane; without the label none of them are.
+    const statuses = [
+      'Backlog',
+      'To Do',
+      'Refinement Review',
+      'Ready for Implementation',
+      'Code Review',
+      'Changes Requested',
+      'Rebase Required',
+    ];
+    for (const status of statuses) {
+      const action = decide(ticket({ status, labels: [] }), config);
+      assert.equal(action.kind, 'idle', status);
+      assert.equal(action.kind === 'idle' && action.reason, 'human lane', status);
+    }
+  });
+
+  it('ignores every other label a ticket happens to carry', () => {
+    const action = decide(ticket({ labels: ['needs-design', 'p1'] }), config);
+    assert.equal(action.kind, 'idle');
+  });
+
+  it('stops dispatching the moment a human takes the ticket back', () => {
+    // Mid-flight lane change. Nothing new goes out; the agent already running
+    // stands down at its own write guard, which is not this function's job.
+    assert.equal(decide(ticket({ status: 'Refining', labels: [] }), config).kind, 'idle');
+  });
+});
+
 describe('decide — kickoff and human gates', () => {
-  it('dispatches refinement when a human adds the kickoff label', () => {
-    const action = decide(ticket({ labels: ['agent-refine'] }), config);
-    assert.equal(action.kind, 'dispatch_refine');
-    assert.equal(action.mutation.status, 'Refining');
-    // The label must come off, or the next tick dispatches again.
-    assert.deepEqual(action.mutation.removeLabels, ['agent-refine']);
+  it('dispatches refinement for a labelled ticket in a draft column', () => {
+    for (const status of ['Backlog', 'To Do']) {
+      const action = decide(ticket({ status }), config);
+      assert.equal(action.kind, 'dispatch_refine', status);
+      assert.equal(action.kind === 'dispatch_refine' && action.mutation.status, 'Refining');
+    }
+  });
+
+  it('leaves the lane label on when it dispatches', () => {
+    // The label is standing consent, not a doorbell. Consuming it here would
+    // drop the ticket out of the pipeline after a single stage.
+    const action = decide(ticket(), config);
+    assert(action.kind === 'dispatch_refine');
+    assert.equal(action.mutation.removeLabels, undefined);
   });
 
   it('idles at the refinement review gate', () => {
     assert.equal(decide(ticket({ status: 'Refinement Review' }), config).kind, 'idle');
   });
 
-  it('re-refines when the human sends it back with comments', () => {
-    const action = decide(
-      ticket({ status: 'Refinement Review', labels: ['agent-changes-requested'] }),
-      config,
-    );
+  it('re-refines when the human moves it back to a draft column', () => {
+    // The old changes-requested label's replacement: the board carries the
+    // verdict, so sending a story back is just moving the card.
+    const action = decide(ticket({ status: 'To Do' }), config);
     assert.equal(action.kind, 'dispatch_refine');
-    assert.deepEqual(action.mutation.removeLabels, ['agent-changes-requested']);
   });
 
   it('idles at the merge gate — merging is the human’s call', () => {
@@ -170,9 +210,13 @@ describe('decide — kickoff and human gates', () => {
     }
   });
 
-  it('ignores a stale kickoff label once the ticket has moved on', () => {
-    const action = decide(ticket({ status: 'Awaiting Merge', labels: ['agent-refine'] }), config);
-    assert.equal(action.kind, 'idle');
+  it('does not kick off from a column it does not recognise', () => {
+    // The reason kickoff tests the draft columns rather than just the label.
+    // A real board has columns this state machine has never heard of, and a
+    // ticket parked in one would otherwise be re-refined on every tick.
+    for (const status of ['Blocked', 'On Hold', 'Awaiting Merge']) {
+      assert.equal(decide(ticket({ status }), config).kind, 'idle', status);
+    }
   });
 });
 

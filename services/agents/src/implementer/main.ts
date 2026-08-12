@@ -87,8 +87,9 @@ async function handle(ctx: AgentTaskContext<ImplementWorkItem>): Promise<Impleme
       case 'initial': {
         // TODO:
         //  1. Create `branch` off item.repository.baseBranch.
-        //  2. Implement against item.refinedDescription and
-        //     item.acceptanceCriteria, starting from item.relevantPaths.
+        //  2. Implement against item.refinedDescription, which is the whole
+        //     spec — acceptance criteria and the paths the refiner found are
+        //     prose inside it, not separate fields.
         //  3. Verify before pushing, using the repo's own commands — this task
         //     is running in the stack image selected by item.runtime.stack, so
         //     the toolchain is present:

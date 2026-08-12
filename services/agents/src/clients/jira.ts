@@ -1,12 +1,43 @@
 /**
  * Jira, agent side — the write path.
  *
- * PLACEHOLDER — signatures settled, bodies not. See services/watcher/src/jira.ts
- * for the read path; the two deliberately stay separate so the watcher's role
- * cannot be widened by accident.
+ * Auth and transport mirror services/watcher/src/jira.ts, which is the one
+ * client verified against live credentials. The duplication is deliberate: the
+ * two clients stay separate so the watcher's role cannot be widened by
+ * accident, and a shared base class would be the seam through which it was.
+ *
+ * The agent writes its own product and its own transition. That is not a
+ * widening of privilege — publishing the story already requires editing the
+ * ticket, and once you can do that, moving the card is not a bigger grant. What
+ * keeps it safe is the lane check the caller runs first; see readLaneState.
  */
 
-import type { JiraConfig, Logger, RefinedStory, ReviewFeedback, TicketMutation } from '@cloud-harness/shared';
+import {
+  textToAdf,
+  type JiraConfig,
+  type Logger,
+  type ReviewFeedback,
+  type TicketMutation,
+} from '@cloud-harness/shared';
+
+/** Carries the HTTP status so callers can tell "not found" from "denied". */
+export class JiraError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly url: string,
+  ) {
+    super(message);
+    this.name = 'JiraError';
+  }
+}
+
+/** The two fields the lane guard needs. Deliberately not a TicketSnapshot —
+ *  the agent has no business reading the board generally. */
+export interface LaneState {
+  status: string;
+  labels: string[];
+}
 
 export class JiraWriter {
   constructor(
@@ -19,26 +50,132 @@ export class JiraWriter {
     return `Basic ${encoded}`;
   }
 
-  /**
-   * TODO: same three-call sequence as the watcher's applyMutation — labels,
-   * then comment, then transition. Status last, so a partial failure leaves the
-   * ticket recoverable.
-   */
-  async applyMutation(_issueKey: string, _mutation: TicketMutation): Promise<void> {
-    throw new Error('JiraWriter.applyMutation not implemented');
+  private async request<T>(path: string, init: { method?: string; body?: unknown } = {}): Promise<T> {
+    const url = `${this.config.baseUrl}${path}`;
+    const response = await fetch(url, {
+      method: init.method ?? 'GET',
+      headers: {
+        authorization: this.authHeader,
+        accept: 'application/json',
+        ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
+      },
+      ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '<unreadable body>');
+      throw new JiraError(
+        `${init.method ?? 'GET'} ${path} failed: ${response.status} ${detail.slice(0, 500)}`,
+        response.status,
+        url,
+      );
+    }
+
+    // 204 on transitions and issue updates.
+    if (response.status === 204) return undefined as T;
+    const text = await response.text();
+    return (text ? JSON.parse(text) : undefined) as T;
   }
 
   /**
-   * Writes the refined story back for human review.
+   * Re-read the lane and column, immediately before writing.
    *
-   * TODO: decide the format first — see the note on parseRefinedStory in
-   * services/watcher/src/work-items.ts. Whatever is written here has to be
-   * machine-readable on the way back out, because the implementer and reviewer
-   * both consume it. A fenced JSON block under a known heading in the
-   * description is the recommended POC shape.
+   * The work item is minutes old by the time an agent finishes, and a human can
+   * have taken the ticket back in that window. Dispatch-time consent is not
+   * consent now, so every write is preceded by this.
+   *
+   * Not atomic with the write that follows — Jira offers no compare-and-swap on
+   * issue edit — but it shrinks the window from the length of a whole run to the
+   * gap between two calls.
    */
-  async publishRefinement(_issueKey: string, _refined: RefinedStory): Promise<void> {
-    throw new Error('JiraWriter.publishRefinement not implemented');
+  async readLaneState(issueKey: string): Promise<LaneState> {
+    const issue = await this.request<{
+      fields?: { status?: { name?: string }; labels?: string[] };
+    }>(`/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=status,labels`);
+
+    return {
+      status: issue.fields?.status?.name ?? '',
+      labels: issue.fields?.labels ?? [],
+    };
+  }
+
+  /**
+   * Writes the refined story into the description, replacing what is there.
+   *
+   * Replacing is the whole contract. The description is where the story lives,
+   * a human edits it in place at the review gate, and a ticket that accumulated
+   * every draft would be unreadable within three passes. A human who edited
+   * while the ticket was in the agent lane loses that edit — deliberately; Jira
+   * keeps the previous value in the issue history if they need it back.
+   */
+  async publishRefinement(issueKey: string, story: string): Promise<void> {
+    await this.request(`/rest/api/3/issue/${encodeURIComponent(issueKey)}`, {
+      method: 'PUT',
+      body: { fields: { description: textToAdf(story) } },
+    });
+    this.log.info('published refinement', { issueKey, chars: story.length });
+  }
+
+  /**
+   * Labels, then comment, then status.
+   *
+   * Status goes LAST so a partial failure leaves the ticket in its old column
+   * and the redelivered work item retries cleanly.
+   */
+  async applyMutation(issueKey: string, mutation: TicketMutation): Promise<void> {
+    const key = encodeURIComponent(issueKey);
+
+    // One call for both directions: two can interleave with a human edit and
+    // lose a label.
+    const labelOps = [
+      ...(mutation.addLabels ?? []).map((label) => ({ add: label })),
+      ...(mutation.removeLabels ?? []).map((label) => ({ remove: label })),
+    ];
+    if (labelOps.length > 0) {
+      await this.request(`/rest/api/3/issue/${key}`, {
+        method: 'PUT',
+        body: { update: { labels: labelOps } },
+      });
+    }
+
+    if (mutation.comment) {
+      await this.request(`/rest/api/3/issue/${key}/comment`, {
+        method: 'POST',
+        body: { body: textToAdf(mutation.comment) },
+      });
+    }
+
+    if (mutation.status) {
+      await this.transitionTo(issueKey, mutation.status);
+    }
+  }
+
+  /**
+   * Transitions are executed by transition ID, and which IDs exist depends on
+   * the issue's current status, so this is fetched per call rather than cached.
+   */
+  private async transitionTo(issueKey: string, statusName: string): Promise<void> {
+    const key = encodeURIComponent(issueKey);
+    const available = await this.request<{
+      transitions?: Array<{ id: string; name?: string; to?: { name?: string } }>;
+    }>(`/rest/api/3/issue/${key}/transitions`);
+
+    const match = (available.transitions ?? []).find((t) => t.to?.name === statusName);
+    if (match === undefined) {
+      const options = (available.transitions ?? []).map((t) => t.to?.name ?? t.name ?? t.id).join(', ');
+      throw new Error(
+        `${issueKey}: no transition to "${statusName}" from its current status. ` +
+          `Available: ${options || '<none>'}. ` +
+          'The board workflow must allow this transition, not just have the status.',
+      );
+    }
+
+    await this.request(`/rest/api/3/issue/${key}/transitions`, {
+      method: 'POST',
+      body: { transition: { id: match.id } },
+    });
+    this.log.info('transitioned', { issueKey, to: statusName });
   }
 
   /**
@@ -59,8 +196,9 @@ export class JiraWriter {
    * Records review findings where the implementer can read them back on its
    * next attempt.
    *
-   * TODO: same machine-readability constraint as publishRefinement — the
-   * implementer needs the findings structured, not prose.
+   * TODO: implement on top of applyMutation's comment path. Unlike the refined
+   * story, findings have a shape the implementer needs to act on item by item,
+   * so decide whether that survives as prose or wants its own rendering.
    */
   async publishReview(_issueKey: string, _feedback: ReviewFeedback): Promise<void> {
     throw new Error('JiraWriter.publishReview not implemented');

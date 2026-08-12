@@ -205,12 +205,12 @@ variable "stacks" {
   EOT
 
   type = map(object({
-    dockerfile      = string
-    description     = string
-    default_setup   = string
-    default_build   = string
-    default_test    = string
-    default_lint    = string
+    dockerfile    = string
+    description   = string
+    default_setup = string
+    default_build = string
+    default_test  = string
+    default_lint  = string
   }))
 
   default = {
@@ -342,27 +342,42 @@ variable "jira_statuses" {
   }
 }
 
-variable "jira_labels" {
+variable "jira_agent_label" {
   description = <<-EOT
-    Labels carrying human intent. Labels are used ONLY for signals a human
-    deliberately sends — never to store pipeline state, because anyone with
-    write access to a ticket can change a label and nothing records that they
-    did. The attempt budget is derived from the Jira changelog instead; see
-    packages/shared/src/pipeline.ts.
+    The lane marker, and the only label the pipeline reads.
 
-    refine             human adds this to a drafted ticket to start the pipeline
-    changes_requested  human adds this to send a refinement back
+    Present, the ticket is in the agent lane; absent, it is in the human lane
+    and nothing is dispatched. It is standing consent rather than a trigger —
+    it is not consumed on dispatch and survives until a human removes it. The
+    board column says which stage to run; this says whether to run at all.
+
+    To edit a ticket the agents are working on, a human moves it to the human
+    lane first. Editing in the agent lane is a broken contract and the agent's
+    write wins.
+
+    Labels are used ONLY for signals a human deliberately sends — never to
+    store pipeline state, because anyone with write access can change a label.
+    The attempt budget is derived from the Jira changelog instead; see
+    packages/shared/src/pipeline.ts.
   EOT
 
-  type = object({
-    refine            = string
-    changes_requested = string
-  })
+  type    = string
+  default = "agent"
+}
 
-  default = {
-    refine            = "agent-refine"
-    changes_requested = "agent-changes-requested"
-  }
+variable "jira_draft_statuses" {
+  description = <<-EOT
+    Board columns a ticket is drafted in before the pipeline has touched it. A
+    labelled ticket sitting in one of these is the kickoff signal, and a story
+    sent back from refinement review returns here.
+
+    An allowlist on purpose: a real board has columns this state machine has
+    never heard of, and treating every unrecognised one as a draft would
+    re-refine anything parked in them on every tick.
+  EOT
+
+  type    = list(string)
+  default = ["Backlog", "To Do"]
 }
 
 # ---------------------------------------------------------------------------

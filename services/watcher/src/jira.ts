@@ -152,7 +152,7 @@ export class JiraClient {
       .join(', ');
     const jql =
       `project = "${this.config.projectKey}" AND ` +
-      `(status IN (${statuses}) OR labels = "${this.pipeline.labels.refine}") ` +
+      `(status IN (${statuses}) OR labels = "${this.pipeline.labels.agentLane}") ` +
       `ORDER BY created ASC`;
 
     const tickets: TicketSnapshot[] = [];
@@ -188,11 +188,14 @@ export class JiraClient {
     } while (nextPageToken);
 
     // The refiner needs the human's comments when a refinement was sent back.
-    // Only tickets actually carrying that signal pay for the extra call.
+    // That signal used to be a label; now it is a ticket that has come back to
+    // a draft column still in the agent lane, which is also what a brand-new
+    // ticket looks like. Both are about to be refined and only those pay for
+    // the extra call — a first pass simply finds no comments.
     for (const ticket of tickets) {
       if (
-        ticket.status === this.pipeline.statuses.refinementReview &&
-        ticket.labels.includes(this.pipeline.labels.changesRequested)
+        this.pipeline.draftStatuses.includes(ticket.status) &&
+        ticket.labels.includes(this.pipeline.labels.agentLane)
       ) {
         ticket.reviewerComments = await this.getHumanComments(ticket.issueKey);
       }

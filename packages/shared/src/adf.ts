@@ -4,15 +4,16 @@
  * Jira REST v3 does not take or return strings for rich-text fields: issue
  * descriptions come back as an ADF document tree, and comments must be posted
  * as one. Everything upstream of the Jira clients — TicketSnapshot.description,
- * TicketMutation.comment, RefinedStory — is plain text, so the conversion has
- * to happen right at the boundary.
+ * TicketMutation.comment, the refiner's story — is plain text, so the
+ * conversion has to happen right at the boundary.
  *
- * This is deliberately lossy and deliberately small. The pipeline's own writes
- * are the only content that has to survive a round trip intact, and the one
- * thing that must survive exactly is a fenced code block — that is where the
- * refined story's JSON payload rides (see parseRefinedStory). Human prose in a
- * description can lose its bold and its links without consequence; a mangled
- * code fence breaks the machine-readable contract between agents.
+ * This is deliberately lossy and deliberately small. Prose can lose its bold
+ * and its links without consequence, because the things that read it are models.
+ * The one construct that must survive exactly is a fenced code block: the
+ * refined story quotes real code out of the repository, and a mangled fence
+ * turns a snippet the implementer is meant to follow into noise. That is a
+ * fidelity requirement about code, not a machine-readable contract — nothing
+ * parses the description.
  */
 
 /** An ADF node. Structural only — we never validate against the full schema. */

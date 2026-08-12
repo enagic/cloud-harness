@@ -99,10 +99,29 @@ silently never moves.
 | `Awaiting Merge` | **Human gate 2**, PR approved | Reviewer |
 | `Done` / `Agent Failed` | Terminal | Watcher |
 
+### Two lanes, one label
+
 | Label | Meaning |
 |---|---|
-| `agent-refine` | Human: start the pipeline on this ticket |
-| `agent-changes-requested` | Human: send the refinement back |
+| `agent` | The agent lane. The pipeline may act on this ticket. |
+| *(absent)* | The human lane. Nothing is dispatched, at any stage. |
+
+The label is **standing consent, not a trigger**. It is checked before every
+dispatch and is never consumed, so it stays on the ticket for as long as the
+agents are welcome. The board column says which stage to run; the label says
+whether to run at all.
+
+A ticket may change lanes at any point in its lifecycle, and the pipeline
+assumes nothing about when. Removing the label is how a human takes a ticket
+back — it stops the next dispatch immediately.
+
+> **To edit a ticket the agents are working on, move it to the human lane
+> first.** Editing it in the agent lane breaks the contract, and the agent's
+> write wins. Expect to lose the edit and have to redo it.
+
+That is deliberate. The alternative — agents backing off whenever a description
+changed — makes every write a negotiation and the pipeline unpredictable. One
+rule, enforced consistently, is easier to work with than a clever one.
 
 `make workflow` prints what the current deployment expects.
 
