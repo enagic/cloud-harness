@@ -1,9 +1,14 @@
 # Handoff — 2026-08-12
 
-**The refiner has run end to end on a real ticket.** KAN-6 went To Do →
-Refining → Refinement Review, with a model-written story published into the
-description, against live Jira and live Bitbucket. The refiner-only vertical
-slice is done. What remains is the decisions below and the other two agents.
+**Two of the three agents have now run end to end on a real ticket.** KAN-6 went
+To Do → Refining → Refinement Review → Ready for Implementation → Implementing →
+Code Review, and there is a real pull request on `kwon-cloud/sandbox` with four
+files in it that the repo's own `npm test` passes. Refiner and implementer are
+both done for their happy path. What remains is the reviewer, the implementer's
+other two reasons, and the decisions below.
+
+The sandbox repo is no longer empty, which retires the biggest caveat this
+document used to carry — see "The repo now has code in it".
 
 ## READ FIRST
 
@@ -89,9 +94,109 @@ Six steps. All six ran against KAN-6:
 - **Gate 1 holds.** The board now idles the ticket with "awaiting human
   refinement review", which is exactly the intended stopping point.
 
-Worth knowing: the sandbox repo is nearly empty — `.cloud-harness.yml` and
-nothing else. The refiner behaved well on it, but this has *not* exercised
-exploration of a real codebase, and `readPaths` was a single file.
+## Where the implementer is
+
+The `initial` reason is done and has run live. Six steps, all of which ran
+against KAN-6:
+
+| # | Step | State |
+|---|---|---|
+| 1 | Clone the repo, full depth | Done — `prepareWorkspace`, no `depth` |
+| 2 | Branch off the base | Done — `createBranch`, `checkout -B` |
+| 3 | Read, write, run the suite | Done — AI SDK tool loop, `implement.ts` |
+| 4 | Re-check the ticket is still ours | Done — the lane guard |
+| 5 | Commit, push, open the PR, link it | Done — all four verified live |
+| 6 | Move the card to `Code Review` | Done — `applyMutation` |
+
+`changes_requested` and `rebase` are **rejected up front** as unimplemented
+rather than half handled. Both continue a branch that already exists, which is a
+different job from starting one, and `changes_requested` is where decision 5's
+unresolved consent question lands.
+
+### What the live run proved
+
+- **The whole write path works.** Push, PR creation, remote link and transition
+  all ran against live Bitbucket and live Jira on the first attempt.
+- **The chain to the reviewer is closed.** After the run,
+  `findPullRequestForIssue` returns PR #1 for KAN-6 and `buildWorkItem` produces
+  a `ReviewWorkItem` that passes `isReviewWorkItem`. `dispatch_review` no longer
+  bails — for an agent-authored PR. A human-authored one is still the open
+  question in "Needs verifying".
+- **The loop is cheap and terminates on its own.** 5 steps of a 30 budget,
+  `finishReason: 'stop'`, ~26k in / 4.9k out, 117s wall clock including two full
+  `npm ci`/build/test cycles. The model read `.cloud-harness.yml`, wrote four
+  files, ran the suite itself, and stopped.
+- **The model added a `package-lock.json` nobody asked for**, correctly — the
+  manifest's setup command is `npm ci`, which fails without one. That is the
+  same inference the refiner made about `package.json`, arrived at independently.
+
+### KAN-8: the same slice, through the deployed stack, and the bug it found
+
+KAN-8 ran the whole path in AWS — watcher dispatch, dispatcher Lambda, Fargate
+implementer, PR #2 — with no local driver involved. Getting there turned up two
+separate faults, and both are worth knowing.
+
+**1. `agents-node` had never been pushed to ECR.** The repository existed and was
+empty, so every implementer task died with `CannotPullContainerError` before the
+container started. The message was therefore never *received*, which is why the
+DLQ stayed empty and messages simply accumulated — a failure mode that looks
+nothing like a crash from the queue's side. See the gotcha below; `agents-jvm` is
+still empty and will do exactly the same thing.
+
+**2. The verifier memoised setup *failure*, which poisoned the whole run.** This
+one was mine and it is the more interesting of the two. `run_tests` cached the
+result of `npm ci` so a slow setup was paid once per run rather than once per
+call. Caching success is right. Caching failure is not, because of what a setup
+failure usually means mid-loop: the model has written `package.json` and not yet
+the lockfile, so `npm ci` fails on precisely the file it is about to add. The
+cached error then replays on every later call, the model is told its fix changed
+nothing, and a correct implementation is reported as a failing suite and thrown
+away.
+
+What makes it worth recording is how it presented. The model diagnosed it as
+*"the harness appears to execute against the committed/HEAD snapshot of the
+repo"* — a coherent, entirely wrong theory that would have sent anyone reading
+the comment into the workspace and clone code. It was reading a ninety-second-old
+cached string. KAN-6 had passed only because that run happened to write both
+files before it first ran the tests.
+
+Fixed by caching only success; `MAX_TEST_RUNS` already bounds the retries. The
+test that pinned the old behaviour now pins the new one and names KAN-8.
+
+### Two decisions in the implementer worth knowing before changing it
+
+**A failing suite is not pushed.** No branch, no PR; the ticket goes to
+`Agent Failed` with the failing command and output in a comment. The review
+budget is three round trips and it exists for disagreements about a change, not
+for code that does not run — the reviewer would execute the same command, reach
+the same conclusion, and spend an attempt saying so. The cost is that the run's
+work is discarded, which is the same call the refiner makes when it stands down.
+The alternative considered and not taken: push the branch without a PR so a human
+can salvage it. That breaks the invariant that a branch on the remote passed its
+own suite, and it makes the next run's push a force-push.
+
+**The post-loop verification is run again, by the harness.** The model's own last
+`run_tests` is stale the moment it writes another file, and the loop's natural
+last act is to fix what the run reported — so trusting it would mean reporting a
+green suite for a tree that changed after it. Costs one extra test run per
+implementation and makes `verification` true rather than usually true.
+
+## The repo now has code in it
+
+`kwon-cloud/sandbox` was `.cloud-harness.yml` and nothing else for the whole of
+the refiner's development, and this document used to caveat every refiner result
+with it. That is retired: the KAN-6 PR adds `package.json`, `package-lock.json`,
+`src/index.js` and `src/index.test.js` on `agent/kan-6-hello-world`.
+
+It is still a very small repo. Once a PR is merged, the next refine pass is the
+first one to read a repository with any structure at all — the step budget, the
+prompt and `readPaths` have still never met a real codebase, and on a four-file
+repo every story is still going to size as a 1 or a 3.
+
+**KAN-6 and KAN-8 are the same ticket written twice**, and their PRs (#1 and #2)
+both add `package.json`, a lockfile, an entry point and a test at the repo root.
+They cannot both merge — whichever goes second conflicts on every file. Merge one
+and decline the other before either is treated as a rebase problem.
 
 ### Restored `clone` — what is worth preserving in it
 
@@ -120,7 +225,36 @@ The reason is testability: the handler is importable without starting the SQS
 consume loop, which is what let the live run drive the real code path rather
 than a reimplementation of it. Do the same for the implementer and reviewer.
 
-## What landed this session
+## What landed in the implementer session
+
+- **`services/agents/src/implementer/`** — `implement.ts` (prompt, tool loop,
+  verifier), `edit-tools.ts` (`write_file` / `delete_file`), `handle.ts` (the
+  write order and the lane guard), and `main.ts` reduced to a bootstrap. Same
+  split as the refiner, for the same reason: the handler is importable without
+  the SQS consume loop, which is what let the live run drive the real code path.
+- **The read tools moved** from `refiner/repo-tools.ts` to
+  `runtime/repo-tools.ts`. Both agents need list/read/search, and the implementer
+  composes them with its own write tools rather than there being a write path in
+  the read tools. `resolveWithin`, `describe` and `isSensitive` are now exported
+  for that.
+- **Four Bitbucket stubs are real**: `createBranch`, `commitAll`, `pushBranch`,
+  `openPullRequest`. The class now carries a REST half as well as a git half,
+  with the same Bearer-then-Basic scheme discovery the watcher's reader uses.
+- **`JiraWriter.linkPullRequest` is real.** This is the one that unblocked the
+  reviewer: `dispatch_review` returns undefined without a PR on the ticket.
+- **Tests went 105 → 145.** The write tools' containment cases, `commitAll`
+  against real git repositories, PR idempotency, and the auth fallback.
+
+Two bugs the tests caught, both of which would have been silent in production:
+
+- **The workspace root was not canonicalised** in the write tools, so on any host
+  where the temp directory is a symlink (`/var` -> `/private/var`, i.e. every
+  Mac) *every* write in the repository was refused as an escape attempt. The read
+  tools document this exact trap; the write tools had to learn it separately.
+- **`tsc --build` orphaned the moved test file** in `dist/`, which is the
+  phantom-test gotcha below, hit again by a plain `git mv`.
+
+## What landed in the refiner session
 
 - **The refined story is prose** (decision 1). `RefinedStory` deleted;
   `RefineOutcome.succeeded` carries a string. `parseRefinedStory` deleted from
@@ -623,12 +757,25 @@ Read this before implementing anything — several of these are subtractions.
 
 ## Still open
 
-- **Early abort on the heartbeat.** The write guard is in, but it fires only at
-  the end: a run whose ticket left the agent lane in minute one still burns the
-  whole model call before discovering it. `ctx.onProgress()` already runs on a
-  timer and `ctx.signal` already reaches `generateText`, so checking the lane
-  there would abort early. Throttle it — the heartbeat fires after every tool
-  call, and that is a Jira GET each time.
+- **Early abort on the heartbeat.** The write guard is in — in *both* agents now
+  — but it fires only at the end: a run whose ticket left the agent lane in
+  minute one still burns the whole model call before discovering it.
+  `ctx.onProgress()` already runs on a timer and `ctx.signal` already reaches
+  `generateText`, so checking the lane there would abort early. Throttle it — the
+  heartbeat fires after every tool call, and that is a Jira GET each time. This
+  is worth more now than it was: an implementer run is minutes and several
+  `npm ci` cycles, not one model call.
+- **Nothing marks a ticket failed when an agent crashes.** A thrown handler
+  leaves the SQS message for redelivery and eventually the DLQ, but the ticket
+  stays in `Implementing` / `Refining`, where `decide()` idles it as "agent in
+  flight" forever. The lane-guard and failing-suite paths both handle themselves;
+  an unexpected throw does not. Cheapest fix is probably the watcher noticing a
+  ticket that has been in flight far too long.
+- **Two more Bitbucket identities than the sandbox has.** The implementer pushed
+  and opened its PR as the shared sandbox token, which is also the read identity
+  and the reviewer identity. Decision 5 and the approval rules both assume these
+  are distinct, and none of that is exercised yet — the reviewer approving its own
+  implementer's PR will be the first time it matters.
 - **Does the refiner create child tickets when it recommends a split, or only
   propose the breakdown in a comment?** It has no Jira issue-creation path
   today, and this is a write-permission question as much as a workflow one.
@@ -665,37 +812,54 @@ rather than observation. The preflight harness is the natural place for them.
 
 This matters because `dispatch_review` bails out entirely when `branch`,
 `pullRequestUrl` and `pullRequestId` are missing
-([`work-items.ts:104`](../services/watcher/src/work-items.ts)) — and those are
-populated by the implementer when *it* opens the PR. A human-authored PR leaves
-them empty and the watcher silently does nothing. Decision 5's "apply the label
-at code review" does not work until this is solved.
+([`work-items.ts:104`](../services/watcher/src/work-items.ts)). For an
+*agent-authored* PR this is now solved and verified: the implementer opens the
+PR, `findPullRequestForIssue` matches it on the `agent/<issue-key>` branch
+prefix, and a valid `ReviewWorkItem` comes out the other side. A human-authored
+PR is on no such branch, so the lookup finds nothing and the watcher silently
+does nothing. Decision 5's "apply the label at code review" still does not work
+until this is solved.
 
 ## Suggested next step
 
-The refiner-only slice is done, and the watcher can now build its dispatch. The
-next one is **that dispatch actually landing in a queue**:
+**The reviewer.** It is the only agent that has never run, and it is now the only
+thing between this pipeline and a ticket going all the way to `Awaiting Merge`
+without anyone touching it. Everything it needs exists: KAN-6 is sitting in
+`Code Review` with an open PR, `findPullRequestForIssue` finds it, and
+`buildWorkItem` produces a valid `ReviewWorkItem` — all three verified after the
+implementer run, not assumed.
 
-1. ~~**Decide how the refine path gets past `resolveRuntime`**~~ — **DONE.**
-   `readManifest` and `findPullRequestForIssue` are implemented and verified
-   against the live sandbox; see READ FIRST. What is left before a watcher can
-   dispatch for real is `queues.send`, and that needs SQS to exist.
-2. ~~**Then decide the hand-back vocabulary**~~ — **DONE**, and it turned out
-   not to be a vocabulary; see decision 4. Confidence and size go in the story,
-   open questions go in a comment, and a second pass rehydrates from the ticket.
-   **Verified on the deployed stack**, both passes: KAN-6 asked its question,
-   took a human answer, and folded it in. Three prompt rules came out of that
-   run — read "What the live run showed" before touching the prompt.
-3. **Give the refiner a real repo to read.** Everything so far is one file. The
-   step budget, the prompt, and `readPaths` are all untested against a codebase
-   with actual structure. This is also where the `## Estimate` block gets its
-   first honest test: on a one-file repo every story is a 3.
+Build it the way the last two were built:
 
-Deploying is not on this path and is still a long way off — Terraform has never
-been applied.
+1. **`reviewer/handle.ts` and `reviewer/review.ts`**, with `main.ts` reduced to
+   a bootstrap. The split is what makes a live run possible.
+2. **It is the first agent that needs structured output.** `ReviewFeedback` has
+   a real shape — findings with severities, plus the verification block — so
+   this is where `generateObject` and `AgentModel.structuredOutputs` finally get
+   used. Read the note on that field before relying on it: with the flag off, the
+   openai-compatible provider silently drops the schema and only warns.
+3. **Reuse the implementer's verifier.** `createVerifier` in `implement.ts` is
+   already the "run the repo's own suite, memoise setup, report a value not an
+   exception" logic the reviewer needs for `verification`, and the reviewer is
+   the consumer that field was designed for. Move it to `runtime/` rather than
+   writing a second one — same call as moving the read tools.
+4. **Two stubs are in its way**, both small: `BitbucketClient.approvePullRequest`
+   and `commentOnPullRequest`, plus `JiraWriter.publishReview`. The last one has
+   an open question on it — whether findings survive as prose or want their own
+   rendering — and decision 1 argues fairly strongly for prose.
+5. **The reviewer must not manage the attempt counter.** The watcher increments
+   it on the transition into `Changes Requested`; the reviewer just transitions.
+
+Then the loop closes and the interesting failure modes become reachable: a
+reviewer that sends work back, an implementer that has to read the findings
+(`changes_requested`), and the attempt budget actually being spent.
+
+Deploying is not on this path — Terraform has been applied once and the whole
+pipeline ran in AWS, but everything since has been driven locally.
 
 Not on the critical path, and fine to leave: the attempt counter moving to
-labels (decision 7), the Atlassian tool shapes (decision 8), and everything
-about the implementer and reviewer.
+labels (decision 7), the Atlassian tool shapes (decision 8), and the
+implementer's `rebase` path.
 
 ## Decisions from earlier sessions that still hold
 
@@ -725,7 +889,23 @@ about the implementer and reviewer.
 - **`source .env.local` fails in zsh.** Values contain spaces (`Refinement
   Review`) and are unquoted. Use `node --env-file=.env.local`.
 - **Shell env beats `--env-file`**, so the Atlassian token never needs to be
-  written to disk: `export JIRA_API_TOKEN="$ATLASSIAN_PAT"`.
+  written to disk: `export JIRA_API_TOKEN="$ATLASSIAN_PAT"`. The same precedence
+  bites the other way: exporting the variable *empty* silently beats the value in
+  the file, and the failure reads as "missing required environment variable"
+  pointing at a file that plainly contains it.
+- **A missing stack image looks like "only the implementer is broken".** The
+  refiner runs on `agents-base`; the implementer and reviewer run on
+  `agents-<stack>`. So an unpushed stack image leaves refinement working
+  perfectly and everything after it silently stalled, with an empty DLQ, because
+  the container never starts and the SQS message is never received. Check
+  `aws ecr list-images --repository-name cloud-harness-poc/agents-node` before
+  believing anything else. `./scripts/build-and-push.sh agents-node` fixes it,
+  and **`agents-jvm` is empty right now** — the jvm stack will fail this way the
+  first time it is used.
+- **`WORKSPACE_DIR` is read at module load**, not per call
+  ([`workspace.ts:14`](../services/agents/src/runtime/workspace.ts)). Anything
+  driving an agent handler directly has to set it *before* importing the handler,
+  or the run dies on `mkdtemp '/workspace/...'`.
 - **A ticket in `Refining` / `Implementing` / `Reviewing` is treated as
   in-flight** and idles forever. That status is the watcher's own receipt, not a
   request. Kickoff is the label on a ticket in a draft column.
@@ -798,12 +978,14 @@ The lane model is confirmed end to end against real Jira, not just unit tests.
 Illustrative only — **query the board, do not quote this**:
 
 ```
-KAN-6   [To Do             ] labels=["agent"]  dispatch_refine  -> Refining
+KAN-6   [To Do             ] labels=["agent"]  dispatch_refine   -> Refining
 KAN-6   [Refinement Review ] labels=["agent"]  idle  awaiting human refinement review
+KAN-6   [Code Review       ] labels=["agent"]  dispatch_review   -> Reviewing
 ```
 
-The second line is the state the refiner leaves behind, and it is where KAN-6
-was parked after the live run.
+Those are the three states the two working agents leave behind and the gate
+between them. The last one is what the implementer produced and is where the
+reviewer picks up — but the board moves, so query it.
 
 ```js
 const R = '/Users/mkwon/Code/cloud-harness';

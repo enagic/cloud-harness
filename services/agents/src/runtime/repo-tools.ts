@@ -1,14 +1,18 @@
 /**
- * The refiner's view of the repository: list, read, search.
+ * An agent's view of the repository: list, read, search.
  *
- * This is the whole reason the refiner clones anything. A story that names the
- * files the work lands in and the pattern to follow is worth more to the
- * implementer than any amount of restated prose, and the only way to produce
- * one is to let the model actually look.
+ * This is the whole reason an agent clones anything. For the refiner, a story
+ * that names the files the work lands in and the pattern to follow is worth
+ * more to the implementer than any amount of restated prose; for the
+ * implementer, code that reads like its neighbours can only be written by
+ * something that has read them. The only way to get either is to let the model
+ * actually look.
  *
- * Read-only by construction — there is no tool here that writes, and the
- * refiner runs as the `read` Bitbucket identity, so a model that decides to
- * "just fix it" has nothing to fix it with.
+ * Read-only by construction — there is no tool here that writes. That is what
+ * makes it safe to hand to the refiner, which runs as the `read` Bitbucket
+ * identity and must not "just fix it". An agent that is meant to change files
+ * composes these with its own write tools (see implementer/edit-tools.ts)
+ * rather than finding a write path in here.
  *
  * Every tool is bounded and every tool returns a string, including on failure.
  * A model that asks for a path that does not exist should get a sentence
@@ -62,7 +66,12 @@ const SENSITIVE_FILES = [
   /(^|[-_.])secrets?([-_.]|$)/i,
 ];
 
-function isSensitive(name: string): boolean {
+/**
+ * Exported for the write tools, which need the same answer for a different
+ * reason: the refiner must not read a credential into its context, and the
+ * implementer must not write one into a branch.
+ */
+export function isSensitive(name: string): boolean {
   return SENSITIVE_FILES.some((pattern) => pattern.test(name));
 }
 
@@ -99,7 +108,7 @@ export interface RepoTools {
  * symlink to /etc or to the task's credentials file is a plausible thing to
  * find in a repo the pipeline was pointed at, deliberately or otherwise.
  */
-async function resolveWithin(
+export async function resolveWithin(
   root: string,
   candidate: string,
 ): Promise<{ ok: true; absolute: string } | { ok: false; error: string }> {
@@ -126,7 +135,7 @@ async function resolveWithin(
   }
 }
 
-function describe(err: unknown): string {
+export function describe(err: unknown): string {
   const code = (err as NodeJS.ErrnoException).code;
   if (code === 'ENOENT') return 'no such file or directory';
   if (code === 'EACCES') return 'permission denied';

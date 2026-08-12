@@ -33,7 +33,7 @@ import {
 } from "@cloud-harness/shared";
 
 import type { AgentModel } from "../runtime/model.js";
-import { createRepoTools } from "./repo-tools.js";
+import { createRepoTools } from "../runtime/repo-tools.js";
 
 /**
  * How many tool-call rounds the model gets.

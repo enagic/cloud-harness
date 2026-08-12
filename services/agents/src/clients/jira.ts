@@ -184,17 +184,36 @@ export class JiraWriter {
   }
 
   /**
-   * TODO: POST /rest/api/3/issue/{key}/remotelink
+   * Attach the PR to the ticket as a remote link.
    *
-   * Remote links are how the PR URL travels between agents without needing a
-   * custom field configured on the project. Use a stable `globalId` derived
-   * from the PR id so repeated calls update rather than duplicate the link.
+   * Remote links are how the PR travels to the reviewer without a custom field
+   * configured on the project — the watcher reads it back to populate
+   * `branch` / `pullRequestUrl` / `pullRequestId` on the review work item, and
+   * `dispatch_review` bails out entirely when those are missing.
+   *
+   * The `globalId` is derived from the PR id, which makes this an upsert: Jira
+   * replaces a link with a matching globalId rather than adding a second one, so
+   * a redelivered work item re-links instead of littering the ticket.
    */
   async linkPullRequest(
-    _issueKey: string,
-    _pr: { url: string; id: number; branch: string },
+    issueKey: string,
+    pr: { url: string; id: number; branch: string },
   ): Promise<void> {
-    throw new Error('JiraWriter.linkPullRequest not implemented');
+    await this.request(`/rest/api/3/issue/${encodeURIComponent(issueKey)}/remotelink`, {
+      method: 'POST',
+      body: {
+        globalId: `cloud-harness-pr-${pr.id}`,
+        // Not a Jira application link, so `application` is deliberately absent —
+        // supplying one asks Jira to resolve an app that is not registered.
+        relationship: 'pull request',
+        object: {
+          url: pr.url,
+          title: `PR #${pr.id}: ${pr.branch}`,
+          icon: { url16x16: 'https://bitbucket.org/favicon.ico', title: 'Bitbucket' },
+        },
+      },
+    });
+    this.log.info('linked pull request', { issueKey, pullRequestId: pr.id });
   }
 
   /**
