@@ -50,14 +50,18 @@ pieces fit together this way.
 | **Repo manifest** — `.cloud-harness.yml` parsing, stack defaults | Complete, tested |
 | Stack images — base + node / python / jvm Dockerfiles | Complete |
 | Command execution (`runCommand`, `prepareRepo`) with timeout + abort | Complete |
-| Jira clients (read + write) | **Stub** |
-| Bitbucket clients (read + write) | **Stub** |
-| Refiner / implementer / reviewer bodies | **Stub** |
-| Bedrock model client | **Stub** |
+| Jira clients (read + write) | Complete, verified live |
+| Bitbucket clients (read + write) | Complete except `rebaseOntoBase` |
+| Refiner | Complete, run live end to end |
+| Implementer — `initial` | Complete, run live end to end |
+| Implementer — `changes_requested` / `rebase` | **Stub**, rejected up front |
+| Reviewer | Complete; read half run live, write half never run |
+| Bedrock model client (`packages/shared/src/llm.ts`) | **Stub** — the AI SDK path in `runtime/model.ts` implements Bedrock |
 
-Every stub throws with a `TODO` naming the decisions to settle first. Deploying
-today gives a running skeleton: the watcher polls, the state machine transitions
-tickets, dispatchers scale tasks, queues retry — and each agent fails at its stub.
+Every remaining stub throws with a `TODO` naming the decisions to settle first.
+A ticket can go To Do → Refining → Refinement Review → Ready for Implementation
+→ Implementing → Code Review with a real pull request behind it, all of it
+against live Jira and live Bitbucket.
 
 ```bash
 npm test   # the state machine, including the rules that are easy to get wrong

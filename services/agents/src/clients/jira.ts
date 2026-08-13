@@ -17,7 +17,6 @@ import {
   textToAdf,
   type JiraConfig,
   type Logger,
-  type ReviewFeedback,
   type TicketMutation,
 } from '@cloud-harness/shared';
 
@@ -217,18 +216,16 @@ export class JiraWriter {
   }
 
   /**
-   * TODO — but check whether this needs to exist at all before implementing it.
+   * There is deliberately no `publishReview`.
    *
-   * It used to be "records review findings where the implementer can read them
-   * back", with an open question about whether they survive as prose or want
-   * their own rendering. Decision 9 made that moot: findings go to the pull
-   * request, one comment per finding, anchored at the code. Jira tracks the
-   * status of the work, not the payload.
+   * It was a stub with an open question attached — whether review findings
+   * survive in Jira as prose or want their own rendering. Decision 9 made the
+   * question moot rather than answering it: findings go to the pull request, one
+   * comment per finding, anchored at the code they are about. Jira tracks the
+   * status of the work and does not carry the payload.
    *
-   * What is left for Jira is the transition and at most a one-line pointer at
-   * the PR, and applyMutation already does exactly that.
+   * What was left for Jira is a transition and a one-line pointer at the pull
+   * request, which `applyMutation` already does — so the method dissolved rather
+   * than shrank. See reviewer/handle.ts for the caller that would have used it.
    */
-  async publishReview(_issueKey: string, _feedback: ReviewFeedback): Promise<void> {
-    throw new Error('JiraWriter.publishReview not implemented');
-  }
 }

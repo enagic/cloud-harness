@@ -308,3 +308,217 @@ describe('BitbucketClient.openPullRequest', () => {
     assert.equal(calls.length, 1);
   });
 });
+
+/**
+ * The reviewer's half of the client.
+ *
+ * The response fixtures here are trimmed from real Bitbucket responses, captured
+ * against PR #1 of kwon-cloud/sandbox — including the ones that document what
+ * Bitbucket does NOT do. Reasoning about these endpoints has a poor record in
+ * this project.
+ */
+describe('BitbucketClient — pull request comments', () => {
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  const client = (): BitbucketClient => new BitbucketClient(config({ role: 'reviewer' }), silent);
+
+  /** Trimmed from a real response; `resolution` is absent while a thread is open. */
+  function comment(overrides: Record<string, unknown> = {}): unknown {
+    return {
+      id: 1,
+      content: { raw: 'a finding' },
+      deleted: false,
+      user: { display_name: 'cli-tools', account_id: '712020:abc' },
+      ...overrides,
+    };
+  }
+
+  it('reads the diff as text rather than parsing it as JSON', async () => {
+    const diff = 'diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n';
+    const calls = stubFetch(() => new Response(diff, { status: 200 }));
+
+    assert.equal(await client().getPullRequestDiff(repo, 1), diff);
+    assert.match(calls[0]?.url ?? '', /pullrequests\/1\/diff$/);
+  });
+
+  it('tags authorship by the pipeline signature, not by the account', async () => {
+    stubFetch(() =>
+      json({
+        values: [
+          comment({ id: 10, content: { raw: 'The lockfile is stale.\n\n— cloud-harness' } }),
+          comment({ id: 11, content: { raw: 'Disagree, it is generated.' } }),
+        ],
+      }),
+    );
+
+    const comments = await client().listPullRequestComments(repo, 1);
+
+    assert.deepEqual(
+      comments.map((c) => [c.id, c.author]),
+      [
+        [10, 'agent'],
+        [11, 'human'],
+      ],
+    );
+  });
+
+  /**
+   * Decision 10. A resolved thread is what stops the reviewer re-raising
+   * something already argued down, so it has to arrive tagged rather than
+   * filtered out — the refiner shipped the filtering version once already.
+   */
+  it('carries resolution state instead of hiding resolved threads', async () => {
+    stubFetch(() =>
+      json({
+        values: [
+          comment({ id: 10, resolution: { type: 'comment_resolution' } }),
+          comment({ id: 11 }),
+        ],
+      }),
+    );
+
+    const comments = await client().listPullRequestComments(repo, 1);
+
+    assert.equal(comments.length, 2);
+    assert.deepEqual(
+      comments.map((c) => c.resolved),
+      [true, false],
+    );
+  });
+
+  it('carries the thread structure and each comment’s anchor', async () => {
+    stubFetch(() =>
+      json({
+        values: [
+          comment({ id: 10, inline: { path: 'src/index.js', to: 4, from: null } }),
+          comment({ id: 11, parent: { id: 10 }, inline: { path: 'src/index.js', to: 4 } }),
+          comment({ id: 12, inline: { path: 'package.json', to: null, from: null } }),
+          comment({ id: 13 }),
+        ],
+      }),
+    );
+
+    const comments = await client().listPullRequestComments(repo, 1);
+
+    assert.deepEqual(
+      comments.map((c) => [c.id, c.parentId, c.path, c.line]),
+      [
+        [10, undefined, 'src/index.js', 4],
+        [11, 10, 'src/index.js', 4],
+        // File-level: a path and an explicitly null line.
+        [12, undefined, 'package.json', undefined],
+        // Pull-request level: no inline block at all.
+        [13, undefined, undefined, undefined],
+      ],
+    );
+  });
+
+  /** Tombstones carry no text, only a hole in the numbering. */
+  it('skips deleted comments', async () => {
+    stubFetch(() =>
+      json({ values: [comment({ id: 10, deleted: true, content: { raw: '' } }), comment({ id: 11 })] }),
+    );
+
+    const comments = await client().listPullRequestComments(repo, 1);
+
+    assert.deepEqual(comments.map((c) => c.id), [11]);
+  });
+
+  it('follows pagination', async () => {
+    const calls = stubFetch((url) =>
+      url.includes('page=2')
+        ? json({ values: [comment({ id: 11 })] })
+        : json({
+            values: [comment({ id: 10 })],
+            next: 'https://api.bitbucket.org/2.0/repositories/acme/widgets/pullrequests/1/comments?page=2',
+          }),
+    );
+
+    const comments = await client().listPullRequestComments(repo, 1);
+
+    assert.deepEqual(comments.map((c) => c.id), [10, 11]);
+    assert.equal(calls.length, 2);
+  });
+
+  it('posts a line-level comment as an inline anchor, signed', async () => {
+    const calls = stubFetch(() => json({ id: 99 }));
+
+    const id = await client().commentOnPullRequest(repo, 1, {
+      text: 'This drops the error.',
+      path: 'src/index.js',
+      line: 4,
+    });
+
+    assert.equal(id, 99);
+    assert.deepEqual(calls[0]?.body, {
+      content: { raw: 'This drops the error.\n\n— cloud-harness' },
+      inline: { path: 'src/index.js', to: 4 },
+    });
+  });
+
+  it('posts a file-level comment as an inline anchor with no line', async () => {
+    const calls = stubFetch(() => json({ id: 99 }));
+
+    await client().commentOnPullRequest(repo, 1, {
+      text: 'This file is dead code now.',
+      path: 'src/old.js',
+    });
+
+    assert.deepEqual((calls[0]?.body as { inline: unknown }).inline, { path: 'src/old.js' });
+  });
+
+  it('posts a pull-request-level comment with no anchor at all', async () => {
+    const calls = stubFetch(() => json({ id: 99 }));
+
+    await client().commentOnPullRequest(repo, 1, { text: 'Summary of the review.' });
+
+    assert.equal('inline' in (calls[0]?.body as object), false);
+  });
+
+  it('replies in a thread by parent id', async () => {
+    const calls = stubFetch(() => json({ id: 99 }));
+
+    await client().commentOnPullRequest(repo, 1, { text: 'Still not fixed.', parentId: 10 });
+
+    assert.deepEqual((calls[0]?.body as { parent: unknown }).parent, { id: 10 });
+  });
+});
+
+describe('BitbucketClient.approvePullRequest', () => {
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  const client = (): BitbucketClient => new BitbucketClient(config({ role: 'reviewer' }), silent);
+
+  it('approves', async () => {
+    const calls = stubFetch(() => json({ approved: true }));
+
+    assert.deepEqual(await client().approvePullRequest(repo, 1), { status: 'approved' });
+    assert.equal(calls[0]?.method, 'POST');
+    assert.match(calls[0]?.url ?? '', /pullrequests\/1\/approve$/);
+  });
+
+  /**
+   * The expected refusal, not a fault: Bitbucket does not count an approval from
+   * a pull request's own author, and the sandbox runs all three identities off
+   * one token. Failing the ticket over it would strand work that passed review.
+   */
+  it('reports a refusal as a result rather than throwing', async () => {
+    stubFetch(() => new Response('You cannot approve your own pull request', { status: 400 }));
+
+    const result = await client().approvePullRequest(repo, 1);
+
+    assert.equal(result.status, 'refused');
+    assert.match(result.status === 'refused' ? result.reason : '', /own pull request/);
+  });
+
+  /** Anything else is a real failure and must not be swallowed. */
+  it('throws when the approval is refused for any other reason', async () => {
+    stubFetch(() => new Response('no such pull request', { status: 404 }));
+
+    await assert.rejects(() => client().approvePullRequest(repo, 1), /404/);
+  });
+});

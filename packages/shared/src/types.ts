@@ -154,8 +154,20 @@ export interface ImplementWorkItem extends WorkItemBase {
   existingBranch?: string;
   pullRequestUrl?: string;
 
-  /** Present when reason is `changes_requested`. */
-  reviewFeedback?: ReviewFeedback;
+  /**
+   * There is deliberately no `reviewFeedback` here.
+   *
+   * The reviewer's findings live in the pull request, one comment per finding,
+   * anchored at the code they are about — so nothing hands them to the watcher
+   * and the watcher has nothing to carry. The implementer reads the PR's own
+   * comments when it picks up `changes_requested`.
+   *
+   * Tidiness is the smaller half of the reason. A payload on the work item is a
+   * snapshot taken at dispatch, and comments read off the PR are current at the
+   * moment the container runs. A human may reply to a finding — arguing with it,
+   * or granting consent to fix it — in the minutes between the two, which is
+   * exactly when a stale snapshot does the most damage. See HANDOFF decision 9.
+   */
 }
 
 // ---------------------------------------------------------------------------
@@ -178,6 +190,34 @@ export interface ReviewWorkItem extends WorkItemBase {
 }
 
 /**
+ * One comment on a pull request, tagged the way TicketComment is.
+ *
+ * This is the reviewer's memory, and unlike the refiner's it does NOT ride on
+ * the work item — it is read off the pull request when the agent runs, because
+ * a human may reply to a finding between dispatch and the container starting.
+ * See the note on ImplementWorkItem.
+ *
+ * `resolved` travels rather than filtering: a thread that was argued down and
+ * marked resolved is precisely what stops the reviewer raising it again on the
+ * next pass, and re-raising a settled disagreement is how the attempt budget
+ * gets burned. Tag, do not filter — HANDOFF decision 10, which the refiner
+ * already learned the hard way as `getHumanComments`.
+ */
+export interface PullRequestComment {
+  id: number;
+  /** Set on a reply. Thread reconstruction is grouping on this. */
+  parentId?: number;
+  /** `agent` means the pipeline wrote it; see isAgentComment. */
+  author: 'agent' | 'human';
+  text: string;
+  /** True once someone marked the thread resolved. */
+  resolved: boolean;
+  /** The anchor, when there is one. A reply inherits its parent's. */
+  path?: string;
+  line?: number;
+}
+
+/**
  * One finding, and its address.
  *
  * path/line are not decoration: they are where the comment gets posted. The tier
@@ -186,9 +226,14 @@ export interface ReviewWorkItem extends WorkItemBase {
  * pull request as a whole. The reviewer takes the tightest tier that is true, and
  * PR-level should be rare; see decision 9.
  *
- * A finding whose anchor Bitbucket rejects — an inline comment on a line outside
- * the diff — degrades to the next tier out and says so in the body. It is never
- * dropped.
+ * **Bitbucket will not police the anchor for you.** It accepts an inline comment
+ * on line 9999 of a one-line file, and on a path that is not in the diff at all,
+ * with 201 and no complaint — the comment is simply created where nobody will
+ * ever see it. Decision 9 assumed a rejection to catch and degrade from; there
+ * is none. So the anchor is validated against the diff before the comment is
+ * posted, and a finding whose address does not resolve degrades line → file →
+ * pull request and says in its body where it was meant to go. It is never
+ * dropped, and it is never posted into the void.
  */
 export interface ReviewFinding {
   severity: 'blocker' | 'major' | 'minor';

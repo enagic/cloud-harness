@@ -15,21 +15,21 @@
  * command and bounce it, at the cost of one of three attempts.
  */
 
-import { generateText, stepCountIs, tool, type ToolSet } from 'ai';
-import { z } from 'zod';
+import { generateText, stepCountIs } from 'ai';
 
 import {
   intEnv,
   optionalEnv,
   type ImplementWorkItem,
   type Logger,
-  type RepoManifest,
 } from '@cloud-harness/shared';
 
 import { createRepoTools } from '../runtime/repo-tools.js';
-import { prepareRepo, runCommand } from '../runtime/exec.js';
 import type { AgentModel } from '../runtime/model.js';
+import { createVerifier, type Verification } from '../runtime/verifier.js';
 import { createEditTools } from './edit-tools.js';
+
+export type { Verification } from '../runtime/verifier.js';
 
 /**
  * How many tool-call rounds the model gets.
@@ -41,164 +41,6 @@ import { createEditTools } from './edit-tools.js';
  * thirty rounds is not about to.
  */
 const DEFAULT_MAX_STEPS = 30;
-
-/**
- * How many times the model may run the suite inside one implementation.
- *
- * A test run is the most expensive tool here in wall-clock terms, and the
- * failure it guards against is a model that treats it as a save button.
- */
-const MAX_TEST_RUNS = 6;
-
-/** What the suite said. Mirrors ReviewFeedback.verification, which the reviewer fills in the same way. */
-export interface Verification {
-  /**
-   * False is a real answer, not a missing one: the repo declared no test
-   * command. A branch that was never verified must say so rather than let
-   * silence read as success.
-   */
-  attempted: boolean;
-  command?: string;
-  passed?: boolean;
-  /** Tail-truncated output. Small enough to ride in a Jira comment. */
-  output?: string;
-}
-
-export interface Verifier {
-  tools: ToolSet;
-  /**
-   * Run the suite for the record, sharing this run's memoised setup.
-   *
-   * Called once after the loop, because the model's own last run is stale the
-   * moment it writes another file — and it usually does, since the natural last
-   * act is to fix what the run reported.
-   */
-  verify: () => Promise<Verification>;
-}
-
-/** Output kept per test run. Enough for the model to act on, bounded for context. */
-const TEST_OUTPUT_LIMIT = 8_000;
-
-/**
- * `run_tests` — the repo's own test command, plus the setup it needs.
- *
- * The commands are the manifest's and are run verbatim; the task is already in
- * the stack image that can run them (see RuntimeRef). Setup and build are
- * memoised across calls: `npm ci` costs a minute and its answer does not change
- * between two edits to a source file, so paying it once per run rather than once
- * per call is most of the difference between a loop that converges and one that
- * times out.
- */
-export function createVerifier(options: {
-  manifest: RepoManifest;
-  workdir: string;
-  log: Logger;
-  signal: AbortSignal;
-  onProgress?: () => Promise<void>;
-}): Verifier {
-  const { manifest, workdir, log, signal } = options;
-  let prepared: Promise<string | undefined> | undefined;
-  let runs = 0;
-
-  const commandOptions = {
-    cwd: workdir,
-    log,
-    signal,
-    outputLimit: TEST_OUTPUT_LIMIT,
-  };
-
-  /**
-   * Resolves to an error description, or undefined when the repo is ready.
-   *
-   * **Success is memoised; failure is not.** Memoising the failure too is the
-   * obvious saving and it is wrong, because of what setup failing usually means
-   * mid-loop: the model has written `package.json` and not yet the lockfile, so
-   * `npm ci` fails on exactly the file it is about to add. Cache that and every
-   * later run replays a stale error, the model is told its fix did nothing, and
-   * a correct implementation gets reported as a failing suite. That is not
-   * hypothetical — it is what happened to KAN-8, and the model reasonably but
-   * wrongly concluded the harness was running against the committed HEAD.
-   *
-   * The cost of retrying is bounded by MAX_TEST_RUNS, since setup only runs when
-   * a test run asks for it.
-   */
-  const prepare = async (): Promise<string | undefined> =>
-    (prepared ??= (async () => {
-      const results = await prepareRepo(manifest, commandOptions);
-      const failed = results.find((result) => result.exitCode !== 0);
-      if (failed === undefined) return undefined;
-
-      // Let the next call try again against whatever the model fixes next.
-      prepared = undefined;
-      return (
-        `Setup failed before the tests could run: \`${failed.command}\` exited ` +
-        `${failed.exitCode ?? 'null'}. Fix what it reports and run the tests ` +
-        `again — setup runs against the working tree as it is now, so a file ` +
-        `you add next will be there.\n\n${failed.output}`
-      );
-    })());
-
-  const run = async (): Promise<Verification> => {
-    if (manifest.testCommand === undefined) {
-      return { attempted: false };
-    }
-
-    const setupError = await prepare();
-    if (setupError !== undefined) {
-      return {
-        attempted: true,
-        command: manifest.testCommand,
-        passed: false,
-        output: setupError,
-      };
-    }
-
-    const result = await runCommand(manifest.testCommand, commandOptions);
-    return {
-      attempted: true,
-      command: manifest.testCommand,
-      passed: result.exitCode === 0,
-      output: result.timedOut
-        ? `Timed out after ${result.durationMs}ms.\n\n${result.output}`
-        : result.output,
-    };
-  };
-
-  const runTests = tool({
-    description:
-      "Run the repository's own test suite and return its output. Use this to check your " +
-      'work before you finish, and again after fixing anything it reports. If the ' +
-      'repository declares no test command this says so.',
-    inputSchema: z.object({}),
-    execute: async (): Promise<string> => {
-      try {
-        if (runs >= MAX_TEST_RUNS) {
-          return (
-            `The test-run budget of ${MAX_TEST_RUNS} is spent. Finish the change on the ` +
-            'evidence you have, and say in your summary what you were unable to verify.'
-          );
-        }
-        runs += 1;
-
-        const verification = await run();
-        if (!verification.attempted) {
-          return (
-            'This repository declares no test command in .cloud-harness.yml, so there is ' +
-            'nothing to run. Say so in your summary.'
-          );
-        }
-
-        return verification.passed === true
-          ? `\`${verification.command ?? ''}\` passed (run ${runs} of ${MAX_TEST_RUNS}).\n\n${verification.output ?? ''}`
-          : `\`${verification.command ?? ''}\` FAILED (run ${runs} of ${MAX_TEST_RUNS}).\n\n${verification.output ?? ''}`;
-      } finally {
-        await options.onProgress?.();
-      }
-    },
-  });
-
-  return { tools: { run_tests: runTests }, verify: run };
-}
 
 export const DEFAULT_SYSTEM_PROMPT = `You implement an approved story in an existing codebase.
 

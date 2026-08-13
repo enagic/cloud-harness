@@ -1,8 +1,9 @@
 /**
  * Bitbucket, agent side — clone, push, PR lifecycle, rebase.
  *
- * IMPLEMENTED: clone, commit, push, and opening a pull request — everything the
- * implementer's first pass needs. Approve, comment and rebase are still stubbed.
+ * IMPLEMENTED: everything the implementer and the reviewer need — clone, commit,
+ * push, open a pull request, read its diff, read and write its comments, and
+ * approve it. Rebase is the one remaining stub.
  *
  * Two transports live in this one class and they authenticate differently.
  * Git over HTTPS takes the credential through GIT_ASKPASS (see withCredentials);
@@ -31,7 +32,14 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { BitbucketConfig, Logger, RepositoryRef, ReviewFeedback } from '@cloud-harness/shared';
+import {
+  isAgentComment,
+  signAgentComment,
+  type BitbucketConfig,
+  type Logger,
+  type PullRequestComment,
+  type RepositoryRef,
+} from '@cloud-harness/shared';
 
 import { runCommand } from '../runtime/exec.js';
 
@@ -39,6 +47,53 @@ export interface PullRequest {
   id: number;
   url: string;
   branch: string;
+}
+
+/**
+ * One comment to post: the text, and where it goes.
+ *
+ * One finding per call, which is the shape decision 9 settled on. The signature
+ * this used to have took a whole `ReviewFeedback` and could therefore only
+ * produce a single comment carrying every finding — and every reply to it would
+ * have had to say which of the five findings it meant. Each finding is a thread
+ * someone answers; threading does that pairing for free.
+ *
+ * The anchor is validated by the caller against the diff, not here and not by
+ * Bitbucket — see reviewer/diff.ts for why there is nothing to validate against
+ * at this layer.
+ */
+export interface PullRequestCommentDraft {
+  text: string;
+  /** Set for a file-level or line-level comment. */
+  path?: string;
+  /** Set only with `path`, for a line-level comment. */
+  line?: number;
+  /** Set to reply in an existing thread rather than start one. */
+  parentId?: number;
+}
+
+/**
+ * What came back from asking to approve.
+ *
+ * A discriminated result rather than void, because one refusal is expected and
+ * is not a fault: Bitbucket does not count an approval from a pull request's own
+ * author, and in the sandbox one token is the read, implementer and reviewer
+ * identity all at once. The reviewer's verdict is its own; the approval is a
+ * formality that a single-identity deployment cannot express. Anything else
+ * throws, because a reviewer that silently fails to approve is worse than one
+ * that fails loudly.
+ */
+export type ApprovalResult = { status: 'approved' } | { status: 'refused'; reason: string };
+
+/** Bitbucket's comment representation, narrowed to what the pipeline reads. */
+interface BitbucketComment {
+  id?: number;
+  content?: { raw?: string };
+  deleted?: boolean;
+  parent?: { id?: number };
+  /** Present once the thread is resolved; absent while it is open. */
+  resolution?: unknown;
+  inline?: { path?: string; to?: number | null; from?: number | null };
 }
 
 /** Carries the HTTP status so callers can tell "absent" from "denied". */
@@ -78,6 +133,8 @@ const CLONE_TIMEOUT_MS = 10 * 60_000;
 const GIT_TIMEOUT_MS = 5 * 60_000;
 const API_BASE = 'https://api.bitbucket.org/2.0';
 const REQUEST_TIMEOUT_MS = 30_000;
+/** Pages of pull request comments to follow. 100 per page; a bound, not a target. */
+const COMMENT_PAGE_LIMIT = 5;
 
 /**
  * Single-quote a value for `bash -lc`, which is how runCommand executes.
@@ -395,31 +452,7 @@ export class BitbucketClient {
     path: string,
     init: { method?: string; body?: unknown } = {},
   ): Promise<T> {
-    const url = `${API_BASE}${path}`;
-    const send = async (scheme: 'bearer' | 'basic'): Promise<Response> =>
-      fetch(url, {
-        method: init.method ?? 'GET',
-        headers: {
-          authorization: this.apiHeader(scheme),
-          accept: 'application/json',
-          ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
-        },
-        ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
-
-    let response: Response;
-    if (this.scheme !== undefined) {
-      response = await send(this.scheme);
-    } else {
-      response = await send('bearer');
-      if (response.status === 401 && this.config.email !== undefined) {
-        response = await send('basic');
-        if (response.status !== 401) this.scheme = 'basic';
-      } else if (response.status !== 401) {
-        this.scheme = 'bearer';
-      }
-    }
+    const response = await this.send(path, init);
 
     if (!response.ok) {
       const detail = await response.text().catch(() => '<unreadable body>');
@@ -431,7 +464,47 @@ export class BitbucketClient {
     }
 
     if (response.status === 204) return undefined as T;
-    return (await response.json()) as T;
+    const text = await response.text();
+    return (text === '' ? undefined : JSON.parse(text)) as T;
+  }
+
+  /**
+   * The raw request, with the Bearer-then-Basic scheme discovery the watcher's
+   * reader uses. The scheme that works is remembered, so the retry is paid once
+   * per process rather than once per call.
+   *
+   * Separate from api() because the diff resource answers in text/plain, not
+   * JSON, and parsing it as JSON would fail on a perfectly good response.
+   */
+  private async send(
+    path: string,
+    init: { method?: string; body?: unknown } = {},
+    accept = 'application/json',
+  ): Promise<Response> {
+    const url = `${API_BASE}${path}`;
+    const attempt = async (scheme: 'bearer' | 'basic'): Promise<Response> =>
+      fetch(url, {
+        method: init.method ?? 'GET',
+        headers: {
+          authorization: this.apiHeader(scheme),
+          accept,
+          ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
+        },
+        ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+
+    if (this.scheme !== undefined) return attempt(this.scheme);
+
+    const bearer = await attempt('bearer');
+    if (bearer.status !== 401 || this.config.email === undefined) {
+      if (bearer.status !== 401) this.scheme = 'bearer';
+      return bearer;
+    }
+
+    const basic = await attempt('basic');
+    if (basic.status !== 401) this.scheme = 'basic';
+    return basic;
   }
 
   private apiHeader(scheme: 'bearer' | 'basic'): string {
@@ -441,42 +514,196 @@ export class BitbucketClient {
   }
 
   /**
-   * TODO: POST .../pullrequests/{id}/approve
+   * The pull request's diff, as unified text.
    *
-   * Note this approves as whichever account owns BITBUCKET_TOKEN. If the repo
-   * requires approval from someone other than the PR author, the reviewer agent
-   * needs its own Bitbucket identity — worth checking against the repo's merge
-   * checks before assuming a single token works for both agents.
+   * Read from Bitbucket rather than computed with git, for two reasons. The
+   * workspace is cloned `--single-branch`, so the base branch is not even in it
+   * and computing a diff would mean a second authenticated fetch. More
+   * importantly this endpoint is the *three-dot* diff, computed from the merge
+   * base — the same one the pull request page shows, so its line numbers are the
+   * ones an inline comment's `to` is interpreted against. A locally computed
+   * two-dot diff would number the same change differently the moment the base
+   * branch moved, and every anchor would be quietly off.
+   *
+   * It 302s to a `/diff/{spec}?topic=true` URL; fetch follows that on its own.
    */
-  async approvePullRequest(_repo: RepositoryRef, _id: number): Promise<void> {
-    throw new Error('BitbucketClient.approvePullRequest not implemented');
+  async getPullRequestDiff(repo: RepositoryRef, id: number): Promise<string> {
+    const path = `/repositories/${repo.workspace}/${repo.slug}/pullrequests/${id}/diff`;
+    const response = await this.send(path, {}, 'text/plain');
+
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '<unreadable body>');
+      throw new BitbucketApiError(
+        `reading the diff of pull request ${id} as the ${this.config.role} identity: ` +
+          `HTTP ${response.status} ${detail.slice(0, 300)}`,
+        response.status,
+      );
+    }
+
+    const diff = await response.text();
+    this.log.info('read pull request diff', { id, bytes: diff.length });
+    return diff;
   }
 
   /**
-   * TODO: POST .../pullrequests/{id}/comments
+   * Every comment on the pull request, oldest first, tagged rather than filtered.
    *
-   * This signature is wrong and should change when it is implemented. Taking the
-   * whole ReviewFeedback can only produce one comment carrying every finding,
-   * which is the shape decision 9 rejects: each finding is a thread someone
-   * replies to, and five findings in one comment forces every reply to say which
-   * of the five it means. Take a single finding and call this once per finding.
+   * This is the reviewer's memory and the implementer's brief, and decision 10
+   * is the whole design of it: **no agent assumes it is the first pass.** A
+   * resolved thread, a finding the implementer argued down, a thread resolved
+   * and then reopened — those are exactly what stops the reviewer raising
+   * something that was already settled, and re-raising a settled disagreement is
+   * how the attempt budget gets burned. So resolution travels as metadata and
+   * nothing is dropped. The refiner already shipped the other version of this
+   * once, as `getHumanComments`, and it handed a second pass the human's answers
+   * with the questions removed.
    *
-   * Anchoring is three-tier and falls out of the finding: path + line is inline,
-   * path alone is file-level, neither is PR-level. `summary` and `verification`
-   * are the PR-level pair. An anchor Bitbucket rejects degrades outward rather
-   * than dropping the finding.
+   * Authorship comes from the pipeline's own signature, not from the account
+   * that posted the comment. The account looks like the stronger signal here —
+   * Bitbucket identities are split three ways precisely so the system can tell
+   * its own work from a human's — but that split does not exist in the sandbox,
+   * where one token is all three, and under it an author check is not weak but
+   * inverted: every comment reads as the pipeline's, including the human's
+   * replies. The signature is true wherever it is read and whoever posted it.
    *
-   * Reading comments back is a separate gap: nothing in this codebase can list a
-   * PR's comments, and decision 10 makes that a precondition for the reviewer,
-   * which must see its own prior threads — resolved ones included — before it
-   * reviews anything.
+   * Deleted comments are skipped: Bitbucket tombstones them with the text
+   * removed, so they carry nothing but a hole in the numbering.
+   */
+  async listPullRequestComments(
+    repo: RepositoryRef,
+    id: number,
+  ): Promise<PullRequestComment[]> {
+    const comments: PullRequestComment[] = [];
+    let path: string | undefined =
+      `/repositories/${repo.workspace}/${repo.slug}/pullrequests/${id}` +
+      `/comments?pagelen=100&sort=created_on`;
+
+    // Bounded rather than open: a pathological thread should cost a fixed number
+    // of calls, and anything past a few hundred comments is not going into a
+    // prompt regardless.
+    for (let page = 0; page < COMMENT_PAGE_LIMIT && path !== undefined; page += 1) {
+      const body: { values?: BitbucketComment[]; next?: string } = await this.api(path);
+
+      for (const comment of body.values ?? []) {
+        if (comment.deleted === true) continue;
+        const text = comment.content?.raw?.trim();
+        if (comment.id === undefined || text === undefined || text === '') continue;
+
+        comments.push({
+          id: comment.id,
+          ...(comment.parent?.id === undefined ? {} : { parentId: comment.parent.id }),
+          author: isAgentComment(text) ? 'agent' : 'human',
+          text,
+          // Presence is the signal. A resolved comment carries a
+          // `comment_resolution` object; an open one has no such key at all.
+          resolved: comment.resolution !== undefined && comment.resolution !== null,
+          ...(comment.inline?.path === undefined ? {} : { path: comment.inline.path }),
+          ...(typeof comment.inline?.to === 'number' ? { line: comment.inline.to } : {}),
+        });
+      }
+
+      // `next` is an absolute URL; api() takes a path under /2.0.
+      path = body.next === undefined ? undefined : body.next.replace(API_BASE, '');
+    }
+
+    this.log.info('read pull request comments', {
+      id,
+      comments: comments.length,
+      resolved: comments.filter((comment) => comment.resolved).length,
+    });
+    return comments;
+  }
+
+  /**
+   * Post one comment, at the tightest anchor its caller could resolve.
+   *
+   * One finding per call. The three tiers are expressed by what is sent, and
+   * they are verified against live Bitbucket: `inline: {path, to}` is a line,
+   * `inline: {path}` is the file, and no `inline` at all is the pull request.
+   *
+   * **The anchor is the caller's problem, and it has to be.** Bitbucket accepts
+   * an inline comment on a line that is not in the diff, and on a path that is
+   * not in the pull request, with 201 and no complaint — the comment is created
+   * attached to nothing. There is no rejection to catch here, which is why
+   * reviewer/diff.ts resolves the anchor before this is called.
+   *
+   * Signed on the way out, exactly as the Jira comments are, so a later pass can
+   * tell its own findings from a human's replies to them.
    */
   async commentOnPullRequest(
-    _repo: RepositoryRef,
-    _id: number,
-    _feedback: ReviewFeedback,
-  ): Promise<void> {
-    throw new Error('BitbucketClient.commentOnPullRequest not implemented');
+    repo: RepositoryRef,
+    id: number,
+    draft: PullRequestCommentDraft,
+  ): Promise<number> {
+    const inline =
+      draft.path === undefined
+        ? undefined
+        : {
+            path: draft.path,
+            ...(draft.line === undefined ? {} : { to: draft.line }),
+          };
+
+    const created = await this.api<BitbucketComment>(
+      `/repositories/${repo.workspace}/${repo.slug}/pullrequests/${id}/comments`,
+      {
+        method: 'POST',
+        body: {
+          content: { raw: signAgentComment(draft.text) },
+          ...(inline === undefined ? {} : { inline }),
+          ...(draft.parentId === undefined ? {} : { parent: { id: draft.parentId } }),
+        },
+      },
+    );
+
+    if (typeof created.id !== 'number') {
+      throw new Error(`Bitbucket returned a comment with no id on pull request ${id}`);
+    }
+
+    this.log.info('commented on pull request', {
+      id,
+      commentId: created.id,
+      anchor: draft.path === undefined ? 'pull_request' : draft.line === undefined ? 'file' : 'line',
+      ...(draft.parentId === undefined ? {} : { inReplyTo: draft.parentId }),
+    });
+    return created.id;
+  }
+
+  /**
+   * Approve the pull request as this identity.
+   *
+   * Refusal is a result, not an exception, and only for the one case that is
+   * expected: Bitbucket does not count an approval from a pull request's own
+   * author, and the sandbox runs the read, implementer and reviewer identities
+   * off a single token — so the reviewer is the author of every PR it reviews
+   * there. That is the deployment's shape rather than a fault in the reviewer,
+   * and failing the ticket over it would strand work that passed its review.
+   *
+   * Everything else throws. A reviewer whose approval silently does not land is
+   * worse than one that stops, because the pull request then sits in
+   * `Awaiting Merge` looking reviewed and carrying no approval.
+   */
+  async approvePullRequest(repo: RepositoryRef, id: number): Promise<ApprovalResult> {
+    try {
+      await this.api(`/repositories/${repo.workspace}/${repo.slug}/pullrequests/${id}/approve`, {
+        method: 'POST',
+      });
+      this.log.info('approved pull request', { id });
+      return { status: 'approved' };
+    } catch (err) {
+      // 400 is what a self-approval comes back as. 409 is included because
+      // "already approved by this account" is the same kind of answer — the
+      // desired state holds and there is nothing to retry.
+      if (err instanceof BitbucketApiError && (err.status === 400 || err.status === 409)) {
+        this.log.warn('approval was refused; the review verdict stands regardless', {
+          id,
+          role: this.config.role,
+          status: err.status,
+          detail: err.message,
+        });
+        return { status: 'refused', reason: err.message };
+      }
+      throw err;
+    }
   }
 
   /**

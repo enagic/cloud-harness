@@ -1,34 +1,61 @@
 # Handoff — 2026-08-13
 
-**Two of the three agents have now run end to end on a real ticket.** KAN-6 went
-To Do → Refining → Refinement Review → Ready for Implementation → Implementing →
-Code Review, and there is a real pull request on `kwon-cloud/sandbox` with four
-files in it that the repo's own `npm test` passes. Refiner and implementer are
-both done for their happy path. What remains is the reviewer, the implementer's
-other two reasons, and the decisions below.
+**All three agents are now built, and the third one has reviewed a real pull
+request.** KAN-6 went To Do → Refining → Refinement Review → Ready for
+Implementation → Implementing → Code Review, there is a real pull request on
+`kwon-cloud/sandbox` with four files in it that the repo's own `npm test`
+passes, and the reviewer has read that pull request, run its suite and reached
+`approved` — against live Bitbucket, live Jira and a live model. What it has
+**not** done yet is write: the run below was stopped deliberately before the
+first comment. See "Where the reviewer is".
 
 The sandbox repo is no longer empty, which retires the biggest caveat this
 document used to carry — see "The repo now has code in it".
 
-Reconciled against the tree on 2026-08-13: working tree clean, 146 tests
-passing. That pass promoted `getPullRequest` from a dormant stub to READ FIRST
-item 1 — it is now a live blocker — flagged `reviewFeedback` as an open decision
-rather than a TODO, and retired the uncommitted-lockfile caveat. Everything it
-touched is marked in place; nothing was silently rewritten.
+Reconciled against the tree on 2026-08-13: working tree clean, 201 tests
+passing.
 
-**`getPullRequest` has since been implemented and verified live** — item 1 below
-is now the lesson it left rather than a blocker. 155 tests passing.
+**Decision 9's anchoring rule was wrong about the mechanism and is corrected in
+place.** It said a finding whose anchor Bitbucket rejects should degrade
+outward. Bitbucket does not reject anchors — an inline comment on line 9999 of a
+one-line file returns 201, as does one on a path the pull request never touches.
+There is no rejection to catch, so the check moved in front of the write. This
+is the third endpoint in this project that turned out not to behave the way this
+document reasoned it would; see READ FIRST item 1 for the previous two.
 
-**Two new decisions, 9 and 10, and they are the ones to read before touching the
-reviewer.** Review findings live in Bitbucket as one comment per finding, not on
-the Jira ticket and not as a single thread; and no agent may assume it is looking
-at something for the first time. Between them they settle `reviewFeedback`
-(deleted), shrink `publishReview` to nearly nothing, and add a PR-comment read
-path that does not exist yet in either service. Decision 9 **reverses** the
-direction the previous session was leaning — that reasoning is preserved in the
+**Decisions 9 and 10 are still the ones to read before touching the reviewer.**
+Review findings live in Bitbucket as one comment per finding, not on the Jira
+ticket and not as a single thread; and no agent may assume it is looking at
+something for the first time. Between them they settled `reviewFeedback`
+(now deleted), dissolved `publishReview` (now deleted), and required a
+PR-comment read path that has since been built. Decision 9 **reverses** the
+direction an earlier session was leaning — that reasoning is preserved in the
 decision so it is not re-derived.
 
 ## READ FIRST
+
+**0. Check what an endpoint does before designing around what it should do.**
+This is now the most repeated lesson in this document and it has cost three
+separate designs. `merge_status` does not exist; the diff endpoint answers a
+different question than the one it looks like it answers; and — new this session
+— **Bitbucket accepts an inline comment on a line that is not in the diff, and
+on a path that is not in the pull request at all, with 201 and no complaint.**
+
+The last one is the expensive shape, because the failure is silent on both
+sides: the API says created, the comment exists, and it is attached to nothing a
+human will ever scroll past. The only tell at creation is an empty
+`context_lines`, and the list endpoint omits that field entirely, so there is not
+even a post-hoc check. A finding lost this way is lost completely.
+
+What it changed: the reviewer parses the pull request's own diff into the set of
+addresses that exist (`reviewer/diff.ts`) and resolves every anchor against it
+**at the moment the model reports the finding**, degrading line → file → pull
+request and telling the model what happened while it can still aim again. The
+degradation rule decision 9 asked for survives intact; only the trigger moved,
+from "Bitbucket rejected it" to "this address does not exist".
+
+The cheap probe that produced this is three POSTs and a GET against a real pull
+request. Do that before writing the next client method.
 
 **1. When a ticket "fails processing", walk the tick from the top of the loop,
 not from the action it was going to take. ** ~~`getPullRequest` is a stub, and it
@@ -254,6 +281,60 @@ last act is to fix what the run reported — so trusting it would mean reporting
 green suite for a tree that changed after it. Costs one extra test run per
 implementation and makes `verification` true rather than usually true.
 
+## Where the reviewer is
+
+Built, and exercised against KAN-6's PR #1 up to the point where it would have
+written. Six steps; five of them ran live.
+
+| # | Step | State |
+|---|---|---|
+| 1 | Read the PR's diff and its existing comments | Done — live, before the clone |
+| 2 | Clone the branch | Done — `prepareWorkspace`, full depth |
+| 3 | Read the change, run the suite, record findings | Done — AI SDK tool loop, `review.ts` |
+| 4 | Re-check the ticket is still ours | Done — the lane guard |
+| 5 | Post one comment per finding, plus the summary | **Written, never run** |
+| 6 | Approve and move to `Awaiting Merge`, or send back | **Written, never run** |
+
+### What the no-write live run proved
+
+Driven through the real `review()` against the real PR, stopped before
+`handle.ts`'s write phase.
+
+- **The read path is whole.** `dispatch_review` → `buildWorkItem` →
+  `getPullRequestDiff` → `listPullRequestComments` → prompt, 6,369 characters,
+  against live Bitbucket as the reviewer identity.
+- **The loop is cheap and terminates on its own.** 5 steps of a 20 budget,
+  `finishReason: 'stop'`, ~23k in / 1.2k out, 178s wall clock including two
+  `npm ci`/build/test cycles.
+- **The verdict came out `approved`** with `npm test` passing, one `minor`
+  finding, and no blockers — which is the right answer for that pull request.
+- **The authoritative re-run happened.** The suite ran twice: once because the
+  model asked, once after the loop for the record. Same reason the implementer
+  does it.
+
+### The two things the run exposed, both prompt-level
+
+- **The model reaches for the pull-request tier too readily.** Its one finding —
+  four files missing a trailing newline — went in with no anchor at all. It is
+  defensible for a claim that genuinely spans four files, but decision 9 is
+  explicit that a reviewer which puts everything at PR level has fallen back to
+  the single-thread shape the decision exists to prevent. Watch this on the next
+  run before changing anything.
+- **The model bundles, exactly as the refiner's `ask_human` did.** That one
+  finding names four files and two distinct problems. The per-finding tool
+  contract is right; the prompt does not yet insist on it. This is the same flaw
+  in the same place twice, which makes it a prompt-writing lesson rather than a
+  reviewer one.
+
+### What has never run
+
+**Nothing in the reviewer's write half.** Posting a finding, posting the summary,
+approving, and both transitions are all unexercised. The single highest-value
+next action is one live run of `handleReview` against KAN-6, which is the only
+way `approvePullRequest` gets its answer — see "Two more Bitbucket identities
+than the sandbox has", which predicts a refusal and which the code now treats as
+an expected result rather than a fault.
+
 ## The repo now has code in it
 
 `kwon-cloud/sandbox` was `.cloud-harness.yml` and nothing else for the whole of
@@ -370,6 +451,15 @@ Two bugs the tests caught, both of which would have been silent in production:
 - **A filter that hides an agent's own prior output from itself.** Decision 10,
   and the refiner already shipped this bug once as `getHumanComments`. Tag
   context, never drop it — including resolved PR threads.
+- **`JiraWriter.publishReview`.** Deleted, not implemented. Decision 9.
+- **An author-account check for pull request comment authorship.** Considered
+  and rejected on evidence, not symmetry: the sandbox runs all three Bitbucket
+  identities off one token, so every comment reports the same `account_id` and
+  the check inverts exactly as it did in Jira. The signature in `comments.ts` is
+  the signal on both sides.
+- **Retry-and-degrade on a rejected inline comment.** There is no rejection —
+  see READ FIRST item 0. The anchor is validated against the diff before the
+  write, in `reviewer/diff.ts`. Do not add a catch that will never fire.
 
 ## Decisions made this session
 
@@ -860,18 +950,40 @@ true:**
   fallen back to the single-thread shape this decision exists to prevent.
 
 The existing type already encodes this without a new field: `path` + `line` is
-inline, `path` alone is file-level, neither is PR-level. Verify the exact `inline`
-payload against a live PR before relying on it — the getPullRequest work is the
-precedent, where every endpoint this document reasoned about turned out to be
-wrong.
+inline, `path` alone is file-level, neither is PR-level. **Verified against a
+live PR** — `inline: {path, to}`, `inline: {path}`, and no `inline` do exactly
+what this says, and a reply carries `parent: {id}` and inherits its parent's
+anchor.
 
-**An anchor that fails must degrade, never drop.** Bitbucket rejects an inline
-comment on a line outside the diff, and a model picking a plausible-but-absent
-line is an ordinary failure, not an exotic one. On rejection, fall back
-line → file → pull request and say in the comment body where it was meant to go.
-A finding that is silently discarded because its address did not resolve is the
-worst outcome available here, and it fails toward "the implementer never hears
-about the blocker."
+**An anchor that fails must degrade, never drop.** That rule stands. The
+mechanism this paragraph originally gave for it does not, and the correction
+matters more than the rule did:
+
+> ~~Bitbucket rejects an inline comment on a line outside the diff... On
+> rejection, fall back line → file → pull request.~~
+
+**Bitbucket does not reject it.** `to: 9999` on a one-line file returns 201. So
+does a path the pull request does not contain. The comment is created and
+orphaned, `context_lines` comes back empty, and the list endpoint does not return
+that field at all — so there is no rejection to catch and no way to notice
+afterwards either. Waiting for a rejection would have meant every mis-aimed
+finding was silently lost, which is the precise outcome this paragraph was
+written to prevent.
+
+So the check moved in front of the write. `reviewer/diff.ts` parses the pull
+request's own three-dot diff into the set of addressable lines per file, and
+`resolveAnchor` picks the tightest tier that actually exists. It runs when the
+model **reports** the finding rather than when the caller posts it, which buys
+something the post-time version could not: the model is told its line was not in
+the diff while it is still in the loop and can aim again.
+
+Two consequences worth keeping:
+
+- **The addressable lines go in the prompt.** A model told up front which lines
+  it may anchor to degrades fewer findings than one told afterwards.
+- **Context lines are treated as addressable, not just added lines.** A finding
+  about an unchanged line next to a change is legitimate. Only the added case is
+  verified live; if orphaned comments ever appear on unchanged lines, narrow it.
 
 #### What this settles and what it costs
 
@@ -887,28 +999,33 @@ current at the moment the implementer runs.** Under decision 5 a human may reply
 to a finding — granting consent, or arguing with it — between the dispatch and
 the container starting. A snapshot is stale exactly when it matters most.
 
-What it costs: **reading PR comments does not exist anywhere in this codebase.**
-Not on `BitbucketClient`, not on `BitbucketReader`. A list path (with thread
-structure, resolution state and reply authorship) and a reply path are both new,
-and they are needed by the reviewer *and* the implementer — and by the watcher if
-decision 5's comment-polling returns. This is the largest single addition the
-decision implies and it is worth knowing before starting the reviewer.
+What it cost: **reading PR comments did not exist anywhere in this codebase.**
+That gap is now closed on the agent side — `listPullRequestComments` returns the
+thread structure, resolution state and signature-based authorship, paged; and
+`commentOnPullRequest` takes one finding and an optional `parentId` to reply.
+`BitbucketReader` still has no comment path, and would need one only if decision
+5's comment-polling returns, which is still open.
 
-Two existing signatures are now wrong:
+**Authorship on the PR side is the signature, not the account** — and this
+reverses the guess in decision 4's closing note, which reasoned that Bitbucket's
+three-way identity split made the account a real signal there. It would be, in a
+deployment that has three tokens. The sandbox has one, so every comment on PR #1
+comes back as the same `account_id` and the same `display_name`, and an author
+check inverts exactly the way it does in Jira. The signature works in both
+deployments; the account check works in neither of the ones that exist. Same
+mechanism as `comments.ts`, reused rather than reinvented.
 
-- **`commentOnPullRequest(repo, id, feedback: ReviewFeedback)`** takes the whole
-  aggregate, which can only produce the single blob this decision rejects. It
-  should take one finding and be called once per finding.
-- **`ReviewFeedback.verification.output`** is documented "keep it small; this
-  rides in a Jira comment." It rides in a pull request comment, and `summary`
-  and `verification` are the two genuinely PR-level things the reviewer
-  produces — the "here is what I ran and what happened" note.
+Both signatures that were wrong are now right:
 
-**`JiraWriter.publishReview` mostly dissolves.** Its open question — whether
-findings survive as prose or want their own rendering — is moot, because findings
-do not go to Jira. What remains is a transition and at most a one-line pointer,
-which `applyMutation` already does. Check whether the method needs to exist at
-all before implementing it.
+- ~~**`commentOnPullRequest(repo, id, feedback: ReviewFeedback)`**~~ — **DONE.**
+  Takes one `PullRequestCommentDraft`, called once per finding.
+- ~~**`ReviewFeedback.verification.output`** says "this rides in a Jira
+  comment"~~ — **DONE.** It rides in a pull request comment, along with
+  `summary`; those two are the genuinely PR-level pair.
+
+~~**`JiraWriter.publishReview` mostly dissolves.**~~ **DONE — it dissolved
+entirely and is deleted.** What was left for Jira is a transition and a one-line
+pointer at the pull request, and `applyMutation` already did exactly that.
 
 ### 10. No agent assumes it is the first pass
 
@@ -987,13 +1104,13 @@ Read this before implementing anything — several of these are subtractions.
   person's. Do not reintroduce an author check as a second signal: under a
   shared account it is true for every comment and would re-break what it is
   meant to reinforce.
-- **`reviewFeedback` on `ImplementWorkItem`.** Decision 9. It has never had a
-  producer and now never will: the reviewer's findings live in the pull request,
-  so nothing hands them to the watcher and the watcher has nothing to carry. The
-  implementer reads the PR's comments itself. Delete the field, and with it the
-  TODO in [`work-items.ts`](../services/watcher/src/work-items.ts) that told the
-  next reader to fill it from the ticket. `ReviewFeedback` itself stays — the
+- ~~**`reviewFeedback` on `ImplementWorkItem`**~~ — **DONE.** Deleted, and the
+  type now carries a note saying why there is no such field, so it is not added
+  back by someone reading `changes_requested` and looking for the payload. The
+  implementer reads the PR's comments itself. `ReviewFeedback` itself stays — the
   reviewer still produces one, it just posts it rather than shipping it.
+- ~~**`JiraWriter.publishReview`**~~ — **DONE.** Deleted rather than
+  implemented; see decision 9.
 - **A `needs_information` / `too_large` outcome variant.** Considered and
   rejected — decision 4. Both are the same board gesture as a success, and what
   distinguishes them belongs in the story a human reads, not in an enum nothing
@@ -1006,16 +1123,18 @@ Read this before implementing anything — several of these are subtractions.
 ## Still open
 
 - **What combination of conditions makes the watcher dispatch the implementer,
-  now that the findings are not on the ticket.** Deliberately left open — decision
-  9 settled where the payload lives, and this is the next thing to work out on top
-  of it. Today `decide()` fires `changes_requested` purely on ticket status
-  ([`pipeline.ts:342`](../packages/shared/src/pipeline.ts)), which may well still
-  be right: agents move their own cards, so the reviewer transitioning the ticket
-  into `Changes Requested` is itself the signal, and Jira carrying only "the
-  implementer's attention is needed" is exactly decision 9's division of labour.
-  What is genuinely unresolved is the human-authored and consent case from
+  now that the findings are not on the ticket.** **Resolved for the agent path,
+  by building it:** the reviewer transitions the ticket into `Changes Requested`
+  itself, and `decide()` firing on that status alone
+  ([`pipeline.ts:342`](../packages/shared/src/pipeline.ts)) is exactly right —
+  Jira carries "the implementer's attention is needed" and nothing else, which is
+  decision 9's division of labour working as intended. Nothing was added to the
+  watcher and nothing needed to be.
+
+  What is still genuinely unresolved is the human-authored and consent case from
   decision 5, which is where "the watcher polls PR comments" came from. Work out
-  whether that polling is needed at all before building it.
+  whether that polling is needed at all before building it — and note the agent
+  path now demonstrates that a status transition can carry the whole signal.
 - **Early abort on the heartbeat.** The write guard is in — in *both* agents now
   — but it fires only at the end: a run whose ticket left the agent lane in
   minute one still burns the whole model call before discovering it.
@@ -1033,13 +1152,23 @@ Read this before implementing anything — several of these are subtractions.
 - **Two more Bitbucket identities than the sandbox has.** The implementer pushed
   and opened its PR as the shared sandbox token, which is also the read identity
   and the reviewer identity. Decision 5 and the approval rules both assume these
-  are distinct, and none of that is exercised yet — the reviewer approving its own
-  implementer's PR will be the first time it matters. **Expect the first live
-  `approvePullRequest` on KAN-6's PR #1 to be refused**, because Bitbucket does
-  not accept an approval from a PR's own author and one token is currently all
-  three identities. That is the sandbox's shape, not a bug in the reviewer;
-  decide whether to split the token or to treat the refusal as expected before
-  the run, so it is not debugged as a fault mid-flight.
+  are distinct. **Expect the first live `approvePullRequest` on KAN-6's PR #1 to
+  be refused**, because Bitbucket does not accept an approval from a PR's own
+  author. That is the sandbox's shape, not a bug in the reviewer.
+
+  **Decided, so it is not debugged mid-flight:** treat the refusal as expected.
+  `approvePullRequest` returns `{status: 'refused', reason}` on a 400 or 409
+  rather than throwing, the reviewer's verdict stands regardless, and the summary
+  comment says out loud that Bitbucket would not record the approval and why —
+  because a PR sitting in `Awaiting Merge` with no approval on it otherwise looks
+  like the reviewer forgot. Every other status still throws: a reviewer whose
+  approval silently does not land is worse than one that stops.
+
+  This is unverified. Nobody has called the endpoint, and it is the single
+  cheapest thing the next live run settles. The confirmed half is that all three
+  identities really are one account today — every comment on PR #1 comes back
+  with the same `account_id`, which is also why PR authorship is read off the
+  pipeline's signature rather than off the account.
 - **Does the refiner create child tickets when it recommends a split, or only
   propose the breakdown in a comment?** It has no Jira issue-creation path
   today, and this is a write-permission question as much as a workflow one.
@@ -1090,65 +1219,70 @@ until this is solved.
 
 ## Suggested next step
 
-**The reviewer.** It is the only agent that has never run, and it is now the only
-thing between this pipeline and a ticket going all the way to `Awaiting Merge`
-without anyone touching it. Most of what it needs exists: KAN-6 is sitting in
-`Code Review` with an open PR, `findPullRequestForIssue` finds it, and
-`buildWorkItem` produces a valid `ReviewWorkItem` — all three verified after the
-implementer run, not assumed.
+**One live write run of the reviewer against KAN-6.** The reviewer is built and
+its read half is verified live, but every line of its write half — posting a
+finding, posting the summary, approving, and both transitions — has never
+executed. That is the last unexercised code on the happy path of the whole
+pipeline, and it is one run away.
 
-The two things that used to come first are both settled:
+What that run settles, none of which can be settled any other way:
 
-- ~~**Implement `getPullRequest`**~~ — **DONE**, and the dispatch it was
-  blocking is verified: a read-only dry run of the whole tick now prints
-  `KAN-6 [Code Review] dispatch_review -> Reviewing`, same for KAN-8. See READ
-  FIRST item 1 for what mergeability turned out to be.
-- ~~**Settle `reviewFeedback`**~~ — **DONE**, decision 9. Findings live in the
-  pull request, one comment per finding, and the field comes off the work item.
-  Read decisions 9 and 10 before writing any reviewer code; between them they
-  determine what the reviewer writes, where it writes it, and what it must read
-  before it starts.
+1. **Whether `approvePullRequest` is refused**, which this document has predicted
+   twice and never checked. The code now treats a 400 or 409 as an expected
+   result rather than a fault, says so in the summary comment, and lets the
+   verdict stand — so a refusal is no longer a mid-flight debugging session. If
+   it is *not* refused, that is worth knowing too, because a reviewer that can
+   approve its own implementer's PR makes the three-identity split look
+   optional when it is not.
+2. **Whether the transitions the workflow allows include `Reviewing` →
+   `Awaiting Merge`.** `resolveStatusIds` only checks that statuses exist. The
+   refiner's and implementer's transitions are proven; these two are not.
+3. **Whether an anchored comment lands where the diff index says it will.** The
+   anchoring is verified for a hand-written probe; it is not yet verified for a
+   finding the model aimed itself.
 
-Then build it the way the last two were built:
+The reviewer's own findings are the natural fixture for the next slice, because
+completing that run leaves KAN-6 in `Awaiting Merge` and closes the loop. To get
+the *interesting* half — a reviewer that sends work back — the cheapest route is
+a ticket whose implementation genuinely fails its own suite, not a contrived
+blocker.
 
-1. **`reviewer/handle.ts` and `reviewer/review.ts`**, with `main.ts` reduced to
-   a bootstrap. The split is what makes a live run possible.
-2. **It is the first agent that needs structured output.** `ReviewFeedback` has
-   a real shape — findings with severities, plus the verification block — so
-   this is where `generateObject` and `AgentModel.structuredOutputs` finally get
-   used. Read the note on that field before relying on it: with the flag off, the
-   openai-compatible provider silently drops the schema and only warns.
-3. **Reuse the implementer's verifier.** `createVerifier` in `implement.ts` is
-   already the "run the repo's own suite, memoise setup, report a value not an
-   exception" logic the reviewer needs for `verification`, and the reviewer is
-   the consumer that field was designed for. Move it to `runtime/` rather than
-   writing a second one — same call as moving the read tools.
-4. **The Bitbucket surface is the real work, and it is bigger than "two small
-   stubs"** — which is what this list used to say. `approvePullRequest` and
-   `commentOnPullRequest` are stubs, and `commentOnPullRequest`'s signature is
-   wrong (decision 9: one finding per call, not the whole `ReviewFeedback`). On
-   top of that, **reading PR comments does not exist at all**, in either service,
-   and decision 10 makes it a precondition rather than a nicety: the reviewer must
-   see its own prior threads, including resolved ones, before it reviews anything.
-   So: list-comments with thread structure and resolution state, reply-to-comment,
-   and the three-tier anchoring with its degradation rule. `JiraWriter.publishReview`
-   shrinks to almost nothing — findings no longer go to Jira — so check whether it
-   needs to exist before implementing it.
-5. **The reviewer must not manage the attempt counter.** Nothing increments it —
-   `countAttempts` ([`pipeline.ts:136`](../packages/shared/src/pipeline.ts))
-   derives it by counting entries into `Changes Requested` in Jira's changelog,
-   which works no matter who moved the card. So the reviewer just transitions,
-   and there is nothing for it to carry or update. This survives decision 2's
-   "agents move their own cards" precisely because the count is derived rather
-   than written; if decision 7 moves it to labels, that stops being true and the
-   label swap has to ride on the watcher's dispatch.
+### Then: the implementer's `changes_requested`
 
-Then the loop closes and the interesting failure modes become reachable: a
-reviewer that sends work back, an implementer that has to read the findings
-(`changes_requested`), and the attempt budget actually being spent.
+This is what the reviewer's write half unblocks, and it is now the only thing
+between here and a machine-to-machine round trip. The work item carries no
+findings by design (decision 9), so the implementer must do what the reviewer
+already does — list the pull request's comments and read the threads, including
+the resolved ones. `listPullRequestComments` and `describeThreads` are both
+built and both reusable; `describeThreads` may want to move to `runtime/`
+alongside the verifier and the read tools when the second consumer appears.
+
+Two things settled during the reviewer's build that this inherits:
+
+- **The reviewer does not manage the attempt counter, and nor should the
+  implementer.** `countAttempts`
+  ([`pipeline.ts:136`](../packages/shared/src/pipeline.ts)) derives it by
+  counting entries into `Changes Requested` in Jira's changelog, which works no
+  matter who moved the card. The reviewer's transition *is* the increment. This
+  survives decision 2's "agents move their own cards" precisely because the
+  count is derived rather than written; if decision 7 moves it to labels, that
+  stops being true and the label swap has to ride on the watcher's dispatch.
+- **`generateObject` was not used, and the reason generalises.** This list used
+  to say the reviewer is "the first agent that needs structured output" and
+  should be where `AgentModel.structuredOutputs` finally gets used. It was not,
+  and the reasoning is worth keeping: a findings pass has to interleave with
+  exploration — read the diff, look at the caller, run the suite, then say what
+  is wrong — and a schema call is a single shot at the end that cannot use
+  tools. It would have meant two model calls, the second re-deriving what the
+  first already knew. `report_finding` is the same buffered-tool shape as the
+  refiner's `ask_human`, which was already proven, and it is intent-shaped per
+  decision 8. `structuredOutputs` remains unused by anything; the note on the
+  field is still accurate and still worth reading before someone reaches for it.
 
 Deploying is not on this path — Terraform has been applied once and the whole
-pipeline ran in AWS, but everything since has been driven locally.
+pipeline ran in AWS, but everything since has been driven locally. Note the
+reviewer runs on the stack images, so a deploy needs `agents-node` pushed; see
+the ECR gotcha.
 
 Not on the critical path, and fine to leave: the attempt counter moving to
 labels (decision 7), the Atlassian tool shapes (decision 8), and the
@@ -1251,6 +1385,20 @@ implementer's `rebase` path.
 - **`tsc --build` leaves orphaned output in `dist/`.** That is how a deleted
   source file kept passing its tests. If test counts ever look surprising, check
   `dist/` against `src/`.
+
+  **Deleting `dist/` is not enough to force a rebuild**, and the failure is
+  confusing: `tsconfig.tsbuildinfo` still says everything is current, so `tsc
+  --build` prints nothing, emits nothing, and every downstream package then fails
+  with "Cannot find module '@cloud-harness/shared'" as though the workspace were
+  broken. Delete both:
+
+  ```
+  find . -name '*.tsbuildinfo' -not -path '*/node_modules/*' -delete
+  ```
+
+  Then build `packages/shared` first — the root `npm run build` does not order
+  the workspaces, so a from-scratch build of everything at once fails on
+  whichever service goes first.
 - **Terraform has been applied and the whole pipeline ran in AWS.** 133
   resources; KAN-7 went To Do → Refining → Refinement Review with a 5,142-char
   story, driven by the deployed watcher, the SQS queue, the dispatcher Lambda
