@@ -452,7 +452,25 @@ export class BitbucketClient {
     throw new Error('BitbucketClient.approvePullRequest not implemented');
   }
 
-  /** TODO: POST .../pullrequests/{id}/comments, optionally inline on a path/line. */
+  /**
+   * TODO: POST .../pullrequests/{id}/comments
+   *
+   * This signature is wrong and should change when it is implemented. Taking the
+   * whole ReviewFeedback can only produce one comment carrying every finding,
+   * which is the shape decision 9 rejects: each finding is a thread someone
+   * replies to, and five findings in one comment forces every reply to say which
+   * of the five it means. Take a single finding and call this once per finding.
+   *
+   * Anchoring is three-tier and falls out of the finding: path + line is inline,
+   * path alone is file-level, neither is PR-level. `summary` and `verification`
+   * are the PR-level pair. An anchor Bitbucket rejects degrades outward rather
+   * than dropping the finding.
+   *
+   * Reading comments back is a separate gap: nothing in this codebase can list a
+   * PR's comments, and decision 10 makes that a precondition for the reviewer,
+   * which must see its own prior threads — resolved ones included — before it
+   * reviews anything.
+   */
   async commentOnPullRequest(
     _repo: RepositoryRef,
     _id: number,

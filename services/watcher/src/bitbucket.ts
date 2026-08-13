@@ -7,9 +7,8 @@
  * repo's manifest, which is what selects the runtime — and therefore the queue
  * and the image — before anything is dispatched.
  *
- * IMPLEMENTED: readManifest and findPullRequestForIssue, both of which run on
- * the dispatch path for every ticket. getPullRequest is still a stub; see the
- * note on it.
+ * IMPLEMENTED: all three of readManifest, findPullRequestForIssue and
+ * getPullRequest, each of which runs on every tick for every pipeline ticket.
  *
  * Auth mirrors preflight, which is the shape verified against live credentials.
  * Two credential types are current and they present differently over the REST
@@ -288,23 +287,98 @@ export class BitbucketReader {
   }
 
   /**
-   * TODO: GET /2.0/repositories/{workspace}/{repo}/pullrequests/{id}
+   * Fetch one PR by id, with its conflict state — reconcile()'s only source.
    *
-   * Still a stub, and off the refine path — a ticket being refined has no agent
-   * branch, so findPullRequestForIssue returns undefined and reconcile() never
-   * asks. It blocks the implementer and reviewer, not the refiner.
+   * This runs on every tick for every ticket that has a PR, which is every
+   * ticket from the implementer's first push onwards, so it is on the hot path
+   * rather than an edge case.
    *
-   * Mergeability is the subtle part. The PR object's own fields do not reliably
-   * report conflict state; the usual approaches are
-   *   - GET .../pullrequests/{id}/diff and treat a 555/409 as conflicted, or
-   *   - inspect the merge-status field, which may report PENDING while
-   *     Bitbucket computes it.
+   * **undefined means "nothing to reconcile", never "conflicted".** Every case
+   * this cannot answer confidently returns it — the PR is gone, its state is
+   * one we do not model, or the conflict check itself failed — because the only
+   * thing reconcilePullRequest does with a conflict is queue a rebase, and a
+   * rebase queued on a guess costs an implementer run and an attempt. Silence
+   * costs one tick.
    *
-   * Whichever we pick, PENDING must map to "unknown", not "conflicted" —
-   * treating it as conflicted would queue a spurious rebase on every fresh PR.
-   * Return undefined for unknown, so reconcilePullRequest does nothing.
+   * Mergeability is asked for separately because the PR object does not carry
+   * it. There is no merge-status field to read: `?fields=merge_status` comes
+   * back empty against live Bitbucket, and the diff endpoint is no help either
+   * — it redirects to a three-dot diff, which is computed from the merge base
+   * and therefore succeeds whether or not the merge would. The supported answer
+   * is the conflicts endpoint, which redirects to `/file-conflicts/{spec}` and
+   * lists the conflicting paths: empty means mergeable, non-empty does not. It
+   * is only asked of OPEN PRs; for a merged or declined one the question is
+   * moot and reconcilePullRequest has already branched on state before it looks
+   * at `mergeable`.
    */
-  async getPullRequest(_repo: RepositoryRef, _id: number): Promise<PullRequestState | undefined> {
-    throw new Error('BitbucketReader.getPullRequest not implemented');
+  async getPullRequest(repo: RepositoryRef, id: number): Promise<PullRequestState | undefined> {
+    const path = `/repositories/${repo.workspace}/${repo.slug}/pullrequests/${id}`;
+    const params = new URLSearchParams({
+      fields: 'id,state,links.html.href,source.branch.name',
+    });
+
+    const response = await this.get(`${path}?${params.toString()}`);
+
+    // The id came from findPullRequestForIssue on this same tick, so a 404 here
+    // is a PR deleted underneath us rather than a bad reference. Nothing to
+    // reconcile, and not worth failing the ticket over.
+    if (response.status === 404) {
+      this.log.warn('pull request not found', { repo: `${repo.workspace}/${repo.slug}`, id });
+      return undefined;
+    }
+
+    const pr = await this.json<BitbucketPullRequest>(response, `reading pull request ${id}`);
+    const branch = pr.source?.branch?.name;
+    const state =
+      pr.state === 'OPEN' || pr.state === 'MERGED' || pr.state === 'DECLINED'
+        ? pr.state
+        : undefined;
+
+    // SUPERSEDED is the state that lands here in practice, and it is neither a
+    // merge nor a decline — guessing at which would either mark the ticket Done
+    // without the work landing or fail it while the replacement PR is open. A
+    // missing branch means the response is not the shape this understands, so
+    // the same silence applies.
+    if (state === undefined || branch === undefined) {
+      this.log.warn('ignoring pull request in an unhandled shape', { id, state: pr.state });
+      return undefined;
+    }
+
+    const found: PullRequestState = {
+      id: pr.id ?? id,
+      state,
+      url:
+        pr.links?.html?.href ??
+        `https://bitbucket.org/${repo.workspace}/${repo.slug}/pull-requests/${id}`,
+      branch,
+      // Overwritten below for an OPEN PR, which is the only state whose
+      // mergeability anything reads.
+      mergeable: true,
+    };
+
+    if (state !== 'OPEN') return found;
+
+    // pagelen=1 because only the count matters here, and it survives the
+    // redirect to /file-conflicts. `size` is the total across pages; the values
+    // length is the fallback for an endpoint that stops reporting one.
+    const conflicts = await this.get(`${path}/conflicts?pagelen=1`);
+    if (!conflicts.ok) {
+      this.log.warn('could not determine mergeability; leaving the pull request alone', {
+        id,
+        status: conflicts.status,
+      });
+      return undefined;
+    }
+
+    const page = (await conflicts.json().catch(() => undefined)) as
+      | { size?: number; values?: unknown[] }
+      | undefined;
+    if (page === undefined) {
+      this.log.warn('unreadable conflict response; leaving the pull request alone', { id });
+      return undefined;
+    }
+
+    found.mergeable = (page.size ?? page.values?.length ?? 0) === 0;
+    return found;
   }
 }

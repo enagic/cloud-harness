@@ -246,3 +246,121 @@ describe('BitbucketReader.findPullRequestForIssue', () => {
     assert.deepEqual(query.getAll('state'), ['OPEN', 'MERGED']);
   });
 });
+
+describe('BitbucketReader.getPullRequest', () => {
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  const open = {
+    id: 7,
+    state: 'OPEN',
+    links: { html: { href: 'https://bitbucket.org/acme/widgets/pull-requests/7' } },
+    source: { branch: { name: 'agent/kan-6-add-widget' } },
+  };
+
+  /** The PR itself, then the conflicts endpoint. */
+  function stubPullRequest(pr: unknown, conflicts: Response): Call[] {
+    return stubFetch((url) => {
+      if (url.includes('/conflicts')) return conflicts;
+      if (url.includes('/pullrequests/')) return json(pr);
+      return undefined;
+    });
+  }
+
+  /** An open PR whose conflict check answers with `conflicts`. */
+  async function withConflicts(conflicts: Response) {
+    stubPullRequest(open, conflicts);
+    return new BitbucketReader(config(), silent).getPullRequest(repo, 7);
+  }
+
+  it('reports an open PR with no conflicts as mergeable', async () => {
+    const calls = stubPullRequest(open, json({ values: [], size: 0 }));
+
+    const found = await new BitbucketReader(config(), silent).getPullRequest(repo, 7);
+
+    assert.deepEqual(found, {
+      id: 7,
+      state: 'OPEN',
+      url: 'https://bitbucket.org/acme/widgets/pull-requests/7',
+      branch: 'agent/kan-6-add-widget',
+      mergeable: true,
+    });
+    assert.equal(calls.length, 2);
+    assert.match(calls[1]!.url, /\/pullrequests\/7\/conflicts\?pagelen=1$/);
+  });
+
+  it('reports conflicting paths as not mergeable', async () => {
+    // The live shape, from a genuinely conflicting revspec on the sandbox.
+    const found = await withConflicts(
+      json({
+        values: [
+          { path: 'package.json', scenario: 'content', message: 'File modified in both' },
+          { path: 'src/index.js', scenario: 'content', message: 'File modified in both' },
+        ],
+        size: 2,
+      }),
+    );
+
+    assert.equal(found?.mergeable, false);
+  });
+
+  // The endpoint reports a total across pages, and pagelen=1 means the values
+  // array cannot be trusted to hold all of them.
+  it('trusts the reported size over the page length', async () => {
+    const found = await withConflicts(json({ values: [{ path: 'package.json' }], size: 4 }));
+
+    assert.equal(found?.mergeable, false);
+  });
+
+  // A merged PR drives the ticket to Done, and asking whether it still merges
+  // is both meaningless and a wasted call.
+  it('does not ask about conflicts on a closed PR', async () => {
+    const calls = stubFetch((url) =>
+      url.includes('/conflicts') ? undefined : json({ ...open, state: 'MERGED' }),
+    );
+
+    const found = await new BitbucketReader(config(), silent).getPullRequest(repo, 7);
+
+    assert.equal(found?.state, 'MERGED');
+    assert.equal(calls.length, 1);
+  });
+
+  // Everything below returns undefined rather than a conflict. A rebase queued
+  // on a guess costs an implementer run; a skipped tick costs a minute.
+  it('returns undefined when the PR has been deleted', async () => {
+    stubFetch(() => new Response('Not Found', { status: 404 }));
+
+    assert.equal(await new BitbucketReader(config(), silent).getPullRequest(repo, 7), undefined);
+  });
+
+  it('returns undefined for a state it does not model', async () => {
+    stubPullRequest({ ...open, state: 'SUPERSEDED' }, json({ values: [], size: 0 }));
+
+    assert.equal(await new BitbucketReader(config(), silent).getPullRequest(repo, 7), undefined);
+  });
+
+  it('returns undefined when mergeability cannot be determined', async () => {
+    const found = await withConflicts(new Response('gateway timeout', { status: 504 }));
+
+    assert.equal(found, undefined);
+  });
+
+  it('returns undefined when the conflict response is not JSON', async () => {
+    const found = await withConflicts(new Response('<html>maintenance</html>'));
+
+    assert.equal(found, undefined);
+  });
+
+  // A read failure on the PR itself is a different thing from a conflict we
+  // could not compute — the credential or the repo is wrong, and that belongs
+  // on the board.
+  it('throws when the PR read is refused', async () => {
+    stubFetch(() => new Response('no access', { status: 403 }));
+
+    await assert.rejects(
+      () => new BitbucketReader(config(), silent).getPullRequest(repo, 7),
+      /403/,
+    );
+  });
+});

@@ -177,6 +177,19 @@ export interface ReviewWorkItem extends WorkItemBase {
   maxAttempts: number;
 }
 
+/**
+ * One finding, and its address.
+ *
+ * path/line are not decoration: they are where the comment gets posted. The tier
+ * falls out of what is set — path and line is an inline comment, path alone is a
+ * file-level comment ("this file is dead code now"), neither is a comment on the
+ * pull request as a whole. The reviewer takes the tightest tier that is true, and
+ * PR-level should be rare; see decision 9.
+ *
+ * A finding whose anchor Bitbucket rejects — an inline comment on a line outside
+ * the diff — degrades to the next tier out and says so in the body. It is never
+ * dropped.
+ */
 export interface ReviewFinding {
   severity: 'blocker' | 'major' | 'minor';
   path?: string;
@@ -199,7 +212,12 @@ export interface ReviewFeedback {
     /** The command run, echoed so the implementer can reproduce it. */
     command?: string;
     passed?: boolean;
-    /** Truncated stdout/stderr. Keep it small; this rides in a Jira comment. */
+    /**
+     * Truncated stdout/stderr. Keep it small; this rides in a pull request
+     * comment. Along with `summary`, it is one of the two genuinely PR-level
+     * things the reviewer produces — findings are anchored at the code they are
+     * about, this is the "what I ran and what happened" note. See decision 9.
+     */
     output?: string;
   };
 }

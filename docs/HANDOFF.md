@@ -1,4 +1,4 @@
-# Handoff — 2026-08-12
+# Handoff — 2026-08-13
 
 **Two of the three agents have now run end to end on a real ticket.** KAN-6 went
 To Do → Refining → Refinement Review → Ready for Implementation → Implementing →
@@ -10,16 +10,95 @@ other two reasons, and the decisions below.
 The sandbox repo is no longer empty, which retires the biggest caveat this
 document used to carry — see "The repo now has code in it".
 
+Reconciled against the tree on 2026-08-13: working tree clean, 146 tests
+passing. That pass promoted `getPullRequest` from a dormant stub to READ FIRST
+item 1 — it is now a live blocker — flagged `reviewFeedback` as an open decision
+rather than a TODO, and retired the uncommitted-lockfile caveat. Everything it
+touched is marked in place; nothing was silently rewritten.
+
+**`getPullRequest` has since been implemented and verified live** — item 1 below
+is now the lesson it left rather than a blocker. 155 tests passing.
+
+**Two new decisions, 9 and 10, and they are the ones to read before touching the
+reviewer.** Review findings live in Bitbucket as one comment per finding, not on
+the Jira ticket and not as a single thread; and no agent may assume it is looking
+at something for the first time. Between them they settle `reviewFeedback`
+(deleted), shrink `publishReview` to nearly nothing, and add a PR-comment read
+path that does not exist yet in either service. Decision 9 **reverses** the
+direction the previous session was leaning — that reasoning is preserved in the
+decision so it is not re-derived.
+
 ## READ FIRST
 
-**1. The watcher's read path to dispatch is implemented and verified live.**
+**1. When a ticket "fails processing", walk the tick from the top of the loop,
+not from the action it was going to take. ** ~~`getPullRequest` is a stub, and it
+blocks every ticket that has a PR.~~ **Resolved** — it is implemented, and the
+tick now reaches `dispatch_review` for both KAN-6 and KAN-8 against the live
+board. The shape it left behind is worth keeping, because it has now bitten
+twice: a stub *upstream* of the thing being blamed, hidden by the per-ticket
+`catch`. `rehydrate` before `resolveRuntime` was the first — see item 2.
+
+What made it invisible: `reconcile` runs *before* `decide`
+([`index.ts:128`](../services/watcher/src/index.ts)) and fires on
+`ticket.pullRequestId !== undefined`, which `rehydrate` populates from
+`findPullRequestForIssue`. The moment the implementer opened PR #1, a stub this
+document had called unreachable was on the hot path for every ticket with a PR,
+throwing into a `catch` that logged "ticket processing failed" and moved on.
+
+**What the mergeability question turned out to be**, since it was the open part
+and the answer was not the one this document guessed at. Both approaches
+suggested here were wrong, and both were checked against live Bitbucket rather
+than reasoned about:
+
+- **There is no merge-status field.** `?fields=merge_status` on the PR resource
+  returns `{}`. So the PENDING → unknown mapping this document worried about
+  never arises, because nothing reports PENDING.
+- **The diff endpoint does not answer it either.** `.../pullrequests/{id}/diff`
+  302s to a *three-dot* diff (`topic=true`), computed from the merge base, which
+  succeeds whether or not the merge would. Treating a 555 as the conflict signal
+  would have detected timeouts, not conflicts.
+- **`.../pullrequests/{id}/conflicts` is the answer.** It redirects to
+  `/file-conflicts/{spec}` and pages the conflicting paths —
+  `{"values": [], "size": 0}` for a clean PR, and entries like
+  `{"path": "package.json", "scenario": "content"}` for a dirty one. Asked only
+  of OPEN PRs, with `pagelen=1` (which survives the redirect) since only the
+  count matters.
+
+**Every case the poll cannot answer confidently returns `undefined`, never
+"conflicted"** — PR deleted, a state we do not model (`SUPERSEDED`), the
+conflicts call failing. A rebase queued on a guess costs an implementer run and
+an attempt; a skipped tick costs a minute. A refused read of the PR *itself*
+still throws, because that is a credential or repo problem and belongs on the
+board.
+
+Note `findPullRequestForIssue` fills `mergeable: true` as a placeholder, which is
+safe *only* because `reconcilePullRequest` is never handed that object — it
+re-fetches through `getPullRequest`. Do not start reading `mergeable` off the
+lookup path.
+
+The conflicted branch is the one thing **not** exercised against a live PR: the
+sandbox has no conflicted PR to point at, and making one means moving `develop`
+under an open PR. The response shape it is coded against is real, though — it
+was read off a genuinely conflicting revspec, PR #2's head against PR #1's,
+through the same `/file-conflicts` endpoint the PR path redirects to. Merging
+either PR (see "The repo now has code in it") would make the other one a live
+conflicted case, which is the cheapest way to close this.
+
+**2. The watcher's read path to dispatch is implemented and verified live.**
 `BitbucketReader.readManifest` and `findPullRequestForIssue`
 ([`services/watcher/src/bitbucket.ts`](../services/watcher/src/bitbucket.ts))
 are real, against live Bitbucket. `resolveRuntime` returns the sandbox's actual
 manifest (`source: 'manifest'`, stack `node`, its four commands), and the refine
 path runs `decide` → `resolveRuntime` → `buildWorkItem` to a `RefineWorkItem`
-that passes `isRefineWorkItem`. The only untested step left in a dispatch is
-`queues.send`, which needs SQS to exist — Terraform has still never been applied.
+that passes `isRefineWorkItem`.
+
+This section used to end "the only untested step left in a dispatch is
+`queues.send`, which needs SQS to exist — Terraform has still never been
+applied." **That is stale and was contradicted elsewhere in this document.**
+Terraform has been applied, 133 resources came up, and KAN-7 and KAN-8 both ran
+dispatch → SQS → dispatcher Lambda → Fargate on the deployed stack. `queues.send`
+is exercised. See the gotcha near the end for what the deployed runs cost and
+what they caught.
 
 The earlier framing of this section was wrong about *where* the watcher died,
 and the correction is worth keeping: **`rehydrate` runs before `resolveRuntime`
@@ -38,16 +117,10 @@ unblocking anything, and it would have left `readManifest` to be written for the
 implementer anyway. The open question it carried (what `runtime` holds on a
 refine item) is moot: the refiner now gets a real one.
 
-`getPullRequest` is **still a stub**, deliberately. It is only reached from
-`reconcile`, which only runs when a ticket already has an agent PR — never true
-on the refine path. Its unresolved part is mergeability, not HTTP: `PENDING`
-must map to unknown rather than conflicted, or every fresh PR queues a spurious
-rebase. Note `findPullRequestForIssue` fills `mergeable: true` as a placeholder,
-which is safe *only* because `reconcilePullRequest` is never handed that object
-— it re-fetches through `getPullRequest`. Do not start reading `mergeable` off
-the lookup path.
+`getPullRequest` was the last stub on the tick and is now implemented — see
+item 1. Nothing on the watcher's poll path is a stub any more.
 
-**2. One lost source file survives only as a pinned git ref.** Written by an
+**3. One lost source file survives only as a pinned git ref.** Written by an
 earlier session, never committed, existing only as a dangling blob that
 `git gc` would eventually prune:
 
@@ -61,7 +134,7 @@ compile against the current tree and is kept only as a record.
 `refs/recovered/bitbucket-client-with-clone` has been **consumed** — its `clone`
 is now in the tree, verified against real Bitbucket, and the ref can be deleted.
 
-**3. Do not state sandbox ticket state from this file.** It goes stale in hours.
+**4. Do not state sandbox ticket state from this file.** It goes stale in hours.
 A previous session claimed a relabelling was outstanding when the user had
 already done it. Query Jira — the dry run at the bottom prints the live board.
 
@@ -290,6 +363,13 @@ Two bugs the tests caught, both of which would have been silent in production:
   decision 1 and `refs/recovered/refine-structured-rejected`.
 - **`parseRefinedStory`.** Deleted deliberately; the watcher carries the
   description and never parses it.
+- **Review findings on the Jira ticket**, in any form — a structured comment, a
+  rendered block, or prose the implementer parses back. Decision 9. They live in
+  the pull request, one comment per finding, anchored at the code. Jira carries
+  whose turn it is and nothing else.
+- **A filter that hides an agent's own prior output from itself.** Decision 10,
+  and the refiner already shipped this bug once as `getHumanComments`. Tag
+  context, never drop it — including resolved PR threads.
 
 ## Decisions made this session
 
@@ -493,7 +573,17 @@ gentle direction.
 
 Sign at the write path, never at the caller. Both `applyMutation`s sign, so
 every pipeline comment carries it: the refiner's questions today, the reviewer's
-findings and the watcher's own notes when those land.
+transition note and the watcher's own notes when those land.
+
+**This is a Jira mechanism and does not automatically extend to the pull request
+comments decision 9 introduces.** The signature exists because Jira has a single
+pipeline identity that may also be a person's. Bitbucket does not have that
+problem by design — the identities are split three ways precisely so the system
+can tell its own branches from a human's — so the author account is a real signal
+there, not an inverted one. It *is* inverted in the sandbox today, where one
+token is all three identities; see "Two more Bitbucket identities than the sandbox
+has". Decide the PR-side authorship signal on Bitbucket's own terms rather than
+assuming this one carries over.
 
 The 20-comment cap is taken from the newest end, so a long-lived ticket loses
 its oldest exchanges — the settled ones — first.
@@ -587,13 +677,22 @@ The ticket status only says whose turn it is. **What** to fix lives in the PR
 review comments, which is a different question and the current design conflates
 them.
 
+> **Decision 9 absorbed the mechanism half of this.** What follows was written as
+> a consent scheme for human-authored PRs, and per-comment threading is now the
+> general transport for *every* review finding, on every PR. That makes consent a
+> property of a structure that already exists rather than a second mechanism to
+> build, and this decision gets smaller. What stays here is the consent rule
+> itself: who may be written to, and on whose say-so.
+
 - **Consent is per review comment, not per PR.** That is what makes "fix these
   three, I'll handle the fourth" expressible, and partial fixes are the most
   valuable property here.
 - **Granted by replying in-thread** on the specific comment. The human answers
   where the question was asked, and threading gives per-item consent for free. A
   single channel carrying N independent topics forces the reader to
-  demultiplex — a PR with five review comments has that problem natively.
+  demultiplex — a PR with five review comments has that problem natively. This
+  argument generalised: it is the reason decision 9 puts every finding on its own
+  thread, not just the ones awaiting a human's answer.
 
 **This is the largest architectural consequence in this document.** The
 implementer today is dispatch → work → done, one task, one shot. This makes it
@@ -632,8 +731,10 @@ function of the invocation reason — narrower tools and a lower step budget whe
 the reason is a consented fix. Expressing it in the deployment only guarantees
 it drifts from the implementer over time.
 
-Also: all three agents are still stubs. A fourth before one works end to end is
-speed in the wrong direction.
+Also, as this was written, all three agents were stubs and a fourth before one
+worked end to end was speed in the wrong direction. Two of the three now run
+live, so that argument has weakened — but the reviewer still has never run, and
+it is what closes the loop. The ordering conclusion is unchanged.
 
 ### 7. The attempt counter moves to labels
 
@@ -722,6 +823,146 @@ Atlassian ships, while `openPullRequest` / `approvePullRequest` /
 `commentOnPullRequest` are the actual migration candidates. Splitting those is
 worth doing on its own merits.
 
+### 9. Review findings live in Bitbucket, one comment per finding
+
+**Jira tracks the status of the work. It does not carry the payload.** The
+ticket's job is to tell the watcher that something needs the implementer's
+attention. What that something *is* belongs in the pull request, next to the code
+it is about.
+
+This settles the question the previous session left open and **reverses the
+answer that session was leaning toward**, which was to put the findings in the
+Jira comment thread and have the implementer rehydrate from it the way the
+refiner does. Same store as the refiner, same mechanism, pleasingly symmetric —
+and wrong, because it moves the detail of a code change onto the board.
+
+Two separate claims, both load-bearing.
+
+**One comment per finding, anchored at the code.** Not one comment listing five
+things. The reason is that every finding is a thread someone will reply to — the
+implementer disagreeing, a human granting consent under decision 5 — and a single
+comment carrying five findings forces every reply to say *which* of the five it
+is about. That is the demultiplexing problem decision 5 already identified, and
+the fix is the one decision 5 already named: put each topic on its own thread and
+let threading do the pairing for free. Decision 5 scoped that to consent on
+human-authored PRs. It is the general shape, and consent is one case of it.
+
+**Anchoring has three tiers, and the reviewer takes the tightest one that is
+true:**
+
+- **Line** — `inline` at `path` and line. The default, and where most findings
+  belong.
+- **File** — `inline` at `path` with no line. The right shape for a claim about
+  the file as a whole: *this file is now dead code, delete it.* Pinning that to
+  an arbitrary line inside it would be a lie about where the problem is.
+- **Pull request** — no anchor. For claims about the change as a whole, which is
+  usually architecture. Should be rare; a reviewer that puts everything here has
+  fallen back to the single-thread shape this decision exists to prevent.
+
+The existing type already encodes this without a new field: `path` + `line` is
+inline, `path` alone is file-level, neither is PR-level. Verify the exact `inline`
+payload against a live PR before relying on it — the getPullRequest work is the
+precedent, where every endpoint this document reasoned about turned out to be
+wrong.
+
+**An anchor that fails must degrade, never drop.** Bitbucket rejects an inline
+comment on a line outside the diff, and a model picking a plausible-but-absent
+line is an ordinary failure, not an exotic one. On rejection, fall back
+line → file → pull request and say in the comment body where it was meant to go.
+A finding that is silently discarded because its address did not resolve is the
+worst outcome available here, and it fails toward "the implementer never hears
+about the blocker."
+
+#### What this settles and what it costs
+
+**`reviewFeedback` comes off `ImplementWorkItem`** — see "What these decisions
+delete". The findings never travel through the watcher at all, so there is
+nothing to fill it with and nothing to parse anywhere. The watcher stays
+content-blind, which is the property decision 1 bought and this preserves for
+free.
+
+There is a second reason beyond tidiness, and it is the stronger one. **A payload
+on the work item is a snapshot taken at dispatch; comments read off the PR are
+current at the moment the implementer runs.** Under decision 5 a human may reply
+to a finding — granting consent, or arguing with it — between the dispatch and
+the container starting. A snapshot is stale exactly when it matters most.
+
+What it costs: **reading PR comments does not exist anywhere in this codebase.**
+Not on `BitbucketClient`, not on `BitbucketReader`. A list path (with thread
+structure, resolution state and reply authorship) and a reply path are both new,
+and they are needed by the reviewer *and* the implementer — and by the watcher if
+decision 5's comment-polling returns. This is the largest single addition the
+decision implies and it is worth knowing before starting the reviewer.
+
+Two existing signatures are now wrong:
+
+- **`commentOnPullRequest(repo, id, feedback: ReviewFeedback)`** takes the whole
+  aggregate, which can only produce the single blob this decision rejects. It
+  should take one finding and be called once per finding.
+- **`ReviewFeedback.verification.output`** is documented "keep it small; this
+  rides in a Jira comment." It rides in a pull request comment, and `summary`
+  and `verification` are the two genuinely PR-level things the reviewer
+  produces — the "here is what I ran and what happened" note.
+
+**`JiraWriter.publishReview` mostly dissolves.** Its open question — whether
+findings survive as prose or want their own rendering — is moot, because findings
+do not go to Jira. What remains is a transition and at most a one-line pointer,
+which `applyMutation` already does. Check whether the method needs to exist at
+all before implementing it.
+
+### 10. No agent assumes it is the first pass
+
+The refiner already works this way and the reasoning was written down as if it
+were a refiner concern. It is not. **It is an invariant for all three agents**,
+and the implementer and reviewer both currently violate it — each is written as a
+cold start.
+
+The reviewer is the one that makes it urgent: it will look at PRs it has already
+reviewed, and the implementer will sometimes disagree with it, and that exchange
+loops. But the same is true of an implementer picking up `changes_requested` on a
+branch carrying its own previous work, and it is already true of the refiner.
+
+**Do not hide resolved context.** A resolved thread, a finding the implementer
+pushed back on, a thread that was resolved and reopened — those are precisely
+what stops the reviewer re-raising something already argued down. Re-raising it
+is how the attempt budget gets burned on a disagreement neither side remembers
+having.
+
+**This is the same bug the refiner already shipped and fixed.** `getHumanComments`
+filtered out the pipeline's own comments, and a second pass therefore received
+the human's answers with the questions removed — "yes, use the existing one"
+attached to nothing. The fix was to return everything **tagged** rather than to
+drop half. Hiding resolved PR threads is that filter again, wearing different
+clothes.
+
+So: **tag, don't filter.** Thread state (`open` / `resolved`) travels as metadata
+the way `author` already does on `TicketComment`. Having been arrived at
+independently twice, it is worth stating as a rule rather than as two fixes.
+
+#### Inject the history; do not trust the model to go and find it
+
+The choice is between putting prior context in the prompt and giving the model a
+tool to fetch it. **Inject** — and this codebase has already run the experiment.
+From the refiner's live runs: three consecutive passes called `ask_human` zero
+times. A working, well-described, genuinely needed tool that the model simply
+declined to reach for until the prompt forced the issue. Relying on a model to
+volunteer that it should go read its own history is betting on the exact behaviour
+that has already failed here once.
+
+The split that makes this cheap: **awareness must be deterministic, depth can be
+lazy.** The threads go in the prompt — path, line, state, messages — so the model
+cannot fail to know a prior pass happened and what was said. A tool can serve full
+detail when a thread is long enough to be worth truncating.
+
+Cost is not currently a concern and should be checked rather than assumed: the
+refiner runs ~6.3k tokens in, the implementer ~26k, and a few rounds of PR
+comments is noise against either. When it stops being noise, truncate oldest-first
+— the same call the 20-comment Jira cap already makes, and for the same reason:
+the oldest exchanges are the settled ones.
+
+This is also what the refiner already does. `conversation` arrives *on the work
+item*; it is not fetched.
+
 ## What these decisions delete
 
 Read this before implementing anything — several of these are subtractions.
@@ -746,6 +987,13 @@ Read this before implementing anything — several of these are subtractions.
   person's. Do not reintroduce an author check as a second signal: under a
   shared account it is true for every comment and would re-break what it is
   meant to reinforce.
+- **`reviewFeedback` on `ImplementWorkItem`.** Decision 9. It has never had a
+  producer and now never will: the reviewer's findings live in the pull request,
+  so nothing hands them to the watcher and the watcher has nothing to carry. The
+  implementer reads the PR's comments itself. Delete the field, and with it the
+  TODO in [`work-items.ts`](../services/watcher/src/work-items.ts) that told the
+  next reader to fill it from the ticket. `ReviewFeedback` itself stays — the
+  reviewer still produces one, it just posts it rather than shipping it.
 - **A `needs_information` / `too_large` outcome variant.** Considered and
   rejected — decision 4. Both are the same board gesture as a success, and what
   distinguishes them belongs in the story a human reads, not in an enum nothing
@@ -757,6 +1005,17 @@ Read this before implementing anything — several of these are subtractions.
 
 ## Still open
 
+- **What combination of conditions makes the watcher dispatch the implementer,
+  now that the findings are not on the ticket.** Deliberately left open — decision
+  9 settled where the payload lives, and this is the next thing to work out on top
+  of it. Today `decide()` fires `changes_requested` purely on ticket status
+  ([`pipeline.ts:342`](../packages/shared/src/pipeline.ts)), which may well still
+  be right: agents move their own cards, so the reviewer transitioning the ticket
+  into `Changes Requested` is itself the signal, and Jira carrying only "the
+  implementer's attention is needed" is exactly decision 9's division of labour.
+  What is genuinely unresolved is the human-authored and consent case from
+  decision 5, which is where "the watcher polls PR comments" came from. Work out
+  whether that polling is needed at all before building it.
 - **Early abort on the heartbeat.** The write guard is in — in *both* agents now
   — but it fires only at the end: a run whose ticket left the agent lane in
   minute one still burns the whole model call before discovering it.
@@ -775,7 +1034,12 @@ Read this before implementing anything — several of these are subtractions.
   and opened its PR as the shared sandbox token, which is also the read identity
   and the reviewer identity. Decision 5 and the approval rules both assume these
   are distinct, and none of that is exercised yet — the reviewer approving its own
-  implementer's PR will be the first time it matters.
+  implementer's PR will be the first time it matters. **Expect the first live
+  `approvePullRequest` on KAN-6's PR #1 to be refused**, because Bitbucket does
+  not accept an approval from a PR's own author and one token is currently all
+  three identities. That is the sandbox's shape, not a bug in the reviewer;
+  decide whether to split the token or to treat the refusal as expected before
+  the run, so it is not debugged as a fault mid-flight.
 - **Does the refiner create child tickets when it recommends a split, or only
   propose the breakdown in a comment?** It has no Jira issue-creation path
   today, and this is a write-permission question as much as a workflow one.
@@ -802,7 +1066,11 @@ rather than observation. The preflight harness is the natural place for them.
    The lane guard is check-then-write and therefore not atomic; the assumption
    is that Jira offers no `If-Match`/ETag equivalent. If one exists, the guard
    could close its remaining race entirely.
-4. **How to find a human-authored PR for a ticket.** Atlassian links branches,
+4. **Does a real conflicted PR come back as `mergeable: false`?** The clean case
+   is verified against PRs #1 and #2 and the conflicted response shape was read
+   off a crossed revspec, but no PR has ever been conflicted here. Merging one of
+   the two duplicate PRs makes the other one the fixture. See READ FIRST item 1.
+5. **How to find a human-authored PR for a ticket.** Atlassian links branches,
    commits and PRs to an issue when the key appears in the name, message or
    title — that part is standard. The question is how to read it back. The
    `dev-status` endpoint is widely used but effectively internal and only works
@@ -824,12 +1092,24 @@ until this is solved.
 
 **The reviewer.** It is the only agent that has never run, and it is now the only
 thing between this pipeline and a ticket going all the way to `Awaiting Merge`
-without anyone touching it. Everything it needs exists: KAN-6 is sitting in
+without anyone touching it. Most of what it needs exists: KAN-6 is sitting in
 `Code Review` with an open PR, `findPullRequestForIssue` finds it, and
 `buildWorkItem` produces a valid `ReviewWorkItem` — all three verified after the
 implementer run, not assumed.
 
-Build it the way the last two were built:
+The two things that used to come first are both settled:
+
+- ~~**Implement `getPullRequest`**~~ — **DONE**, and the dispatch it was
+  blocking is verified: a read-only dry run of the whole tick now prints
+  `KAN-6 [Code Review] dispatch_review -> Reviewing`, same for KAN-8. See READ
+  FIRST item 1 for what mergeability turned out to be.
+- ~~**Settle `reviewFeedback`**~~ — **DONE**, decision 9. Findings live in the
+  pull request, one comment per finding, and the field comes off the work item.
+  Read decisions 9 and 10 before writing any reviewer code; between them they
+  determine what the reviewer writes, where it writes it, and what it must read
+  before it starts.
+
+Then build it the way the last two were built:
 
 1. **`reviewer/handle.ts` and `reviewer/review.ts`**, with `main.ts` reduced to
    a bootstrap. The split is what makes a live run possible.
@@ -843,12 +1123,25 @@ Build it the way the last two were built:
    exception" logic the reviewer needs for `verification`, and the reviewer is
    the consumer that field was designed for. Move it to `runtime/` rather than
    writing a second one — same call as moving the read tools.
-4. **Two stubs are in its way**, both small: `BitbucketClient.approvePullRequest`
-   and `commentOnPullRequest`, plus `JiraWriter.publishReview`. The last one has
-   an open question on it — whether findings survive as prose or want their own
-   rendering — and decision 1 argues fairly strongly for prose.
-5. **The reviewer must not manage the attempt counter.** The watcher increments
-   it on the transition into `Changes Requested`; the reviewer just transitions.
+4. **The Bitbucket surface is the real work, and it is bigger than "two small
+   stubs"** — which is what this list used to say. `approvePullRequest` and
+   `commentOnPullRequest` are stubs, and `commentOnPullRequest`'s signature is
+   wrong (decision 9: one finding per call, not the whole `ReviewFeedback`). On
+   top of that, **reading PR comments does not exist at all**, in either service,
+   and decision 10 makes it a precondition rather than a nicety: the reviewer must
+   see its own prior threads, including resolved ones, before it reviews anything.
+   So: list-comments with thread structure and resolution state, reply-to-comment,
+   and the three-tier anchoring with its degradation rule. `JiraWriter.publishReview`
+   shrinks to almost nothing — findings no longer go to Jira — so check whether it
+   needs to exist before implementing it.
+5. **The reviewer must not manage the attempt counter.** Nothing increments it —
+   `countAttempts` ([`pipeline.ts:136`](../packages/shared/src/pipeline.ts))
+   derives it by counting entries into `Changes Requested` in Jira's changelog,
+   which works no matter who moved the card. So the reviewer just transitions,
+   and there is nothing for it to carry or update. This survives decision 2's
+   "agents move their own cards" precisely because the count is derived rather
+   than written; if decision 7 moves it to labels, that stops being true and the
+   label swap has to ride on the watcher's dispatch.
 
 Then the loop closes and the interesting failure modes become reachable: a
 reviewer that sends work back, an implementer that has to read the findings
@@ -874,8 +1167,9 @@ implementer's `rebase` path.
 - **DeepSeek via OpenRouter is a sandbox cost choice**, not a production model
   decision.
 - **The agent framework is the Vercel AI SDK** (was open decision #1). Adopted
-  in the uncommitted `runtime/model.ts`, which implements both the
-  openai-compatible and Bedrock providers. Mastra, the Claude Agent SDK, Vercel
+  in `runtime/model.ts` — committed in `ec8dbbc`, not uncommitted as this line
+  used to say — which implements both the openai-compatible and Bedrock
+  providers. Mastra, the Claude Agent SDK, Vercel
   Eve, Strands and LangGraph.js were all considered and set aside; the AI SDK
   supplies the one genuinely missing thing, the tool loop inside a single agent
   invocation. **Pin the major version.** Not a one-way door — Mastra's
@@ -899,9 +1193,14 @@ implementer's `rebase` path.
   perfectly and everything after it silently stalled, with an empty DLQ, because
   the container never starts and the SQS message is never received. Check
   `aws ecr list-images --repository-name cloud-harness-poc/agents-node` before
-  believing anything else. `./scripts/build-and-push.sh agents-node` fixes it,
-  and **`agents-jvm` is empty right now** — the jvm stack will fail this way the
-  first time it is used.
+  believing anything else. `./scripts/build-and-push.sh agents-node` fixes it.
+
+  **`destroy` deletes the ECR repositories and every image in them**
+  (`disposable_deployment = true` forces it), so this is not a one-off mistake —
+  it is the default state after every teardown. Run
+  `./scripts/build-and-push.sh` with no arguments after an apply, which builds
+  the watcher, the base and *every* configured stack. Pushing only `agents-node`
+  leaves `agents-jvm` empty and the trap re-armed for the first jvm ticket.
 - **`WORKSPACE_DIR` is read at module load**, not per call
   ([`workspace.ts:14`](../services/agents/src/runtime/workspace.ts)). Anything
   driving an agent handler directly has to set it *before* importing the handler,
@@ -961,8 +1260,11 @@ implementer's `rebase` path.
   `package-lock.json`.** Pre-existing drift — `packages/shared` and
   `services/agents` both declare zod and the lock was never regenerated. Local
   `npm test` passes regardless because `node_modules` already has it, so only
-  `npm ci` in Docker catches it. Fixed with `npm install --package-lock-only`;
-  **the updated lockfile is uncommitted.**
+  `npm ci` in Docker catches it. Fixed with `npm install --package-lock-only`.
+  **Retired:** the lockfile carrying `zod@4.4.3` is committed as of `4436386`,
+  and the working tree is clean. The trap itself stands — a new dependency that
+  only local `node_modules` satisfies still passes `npm test` and still fails the
+  image build.
 - **Do not force a watcher redeployment immediately after `apply`.** The first
   task died with `CannotPullContainerError` — a timeout to the ECR interface
   endpoint's IP, which was still settling. ECS retried and the next task came up

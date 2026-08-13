@@ -66,9 +66,21 @@ export function buildWorkItem(
       if (ticket.branch !== undefined) item.existingBranch = ticket.branch;
       if (ticket.pullRequestUrl !== undefined) item.pullRequestUrl = ticket.pullRequestUrl;
 
-      // TODO: reviewFeedback. The reviewer records its findings on the ticket;
-      // this should read them back so the implementer sees what to fix rather
-      // than re-deriving it from a comment thread.
+      // reviewFeedback is deliberately not filled, and the field is slated for
+      // deletion — see decision 9. The reviewer's findings live in the pull
+      // request as one comment per finding, so they never pass through here:
+      // nothing hands them to the watcher, and the implementer reads them off
+      // Bitbucket itself when it starts.
+      //
+      // That is not only tidiness. Anything carried on the work item is a
+      // snapshot taken at dispatch, and a human may reply to a finding — or
+      // grant consent on it — between this call and the container starting.
+      // Reading the PR at run time gets the current state; this would not.
+      //
+      // An earlier TODO here said to read the findings back off the ticket.
+      // Do not: it would put the detail of a code change on the board and put a
+      // parser in the one file that deliberately has no opinion about what is
+      // inside the ticket's text.
       return item;
     }
 

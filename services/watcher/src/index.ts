@@ -16,9 +16,9 @@
  * @cloud-harness/shared/pipeline, which is pure and tested. This file is I/O
  * and sequencing.
  *
- * STATUS: loop, rehydration and dispatch are real, as is everything they read —
- * the Jira client, and the Bitbucket manifest and PR lookup. Only
- * BitbucketReader.getPullRequest, which step 2 needs, is still a stub.
+ * STATUS: all three steps are real, as is everything they read — the Jira
+ * client, and the Bitbucket manifest read, PR lookup and PR poll. No stub is
+ * left on the tick.
  */
 
 import {

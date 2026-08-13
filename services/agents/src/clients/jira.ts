@@ -217,12 +217,16 @@ export class JiraWriter {
   }
 
   /**
-   * Records review findings where the implementer can read them back on its
-   * next attempt.
+   * TODO — but check whether this needs to exist at all before implementing it.
    *
-   * TODO: implement on top of applyMutation's comment path. Unlike the refined
-   * story, findings have a shape the implementer needs to act on item by item,
-   * so decide whether that survives as prose or wants its own rendering.
+   * It used to be "records review findings where the implementer can read them
+   * back", with an open question about whether they survive as prose or want
+   * their own rendering. Decision 9 made that moot: findings go to the pull
+   * request, one comment per finding, anchored at the code. Jira tracks the
+   * status of the work, not the payload.
+   *
+   * What is left for Jira is the transition and at most a one-line pointer at
+   * the PR, and applyMutation already does exactly that.
    */
   async publishReview(_issueKey: string, _feedback: ReviewFeedback): Promise<void> {
     throw new Error('JiraWriter.publishReview not implemented');
