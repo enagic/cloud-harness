@@ -287,8 +287,21 @@ export type RefineOutcome =
   | { status: 'succeeded'; refined: string }
   | { status: 'failed'; reason: string; retryable: boolean };
 
+/**
+ * The pull request coordinates are optional because not every success creates
+ * one. A `rebase` continues a pull request that already exists, and its work
+ * item carries that PR's URL but not its id — nothing downstream needs either,
+ * since the watcher re-derives the PR from Bitbucket by branch convention on
+ * the next tick. `branch` is the field that is always true.
+ */
 export type ImplementOutcome =
-  | { status: 'succeeded'; pullRequestUrl: string; pullRequestId: number; branch: string; summary: string }
+  | {
+      status: 'succeeded';
+      branch: string;
+      summary: string;
+      pullRequestUrl?: string;
+      pullRequestId?: number;
+    }
   | { status: 'failed'; reason: string; retryable: boolean };
 
 export type ReviewOutcome =

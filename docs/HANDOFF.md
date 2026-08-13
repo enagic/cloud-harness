@@ -208,10 +208,63 @@ against KAN-6:
 | 5 | Commit, push, open the PR, link it | Done — all four verified live |
 | 6 | Move the card to `Code Review` | Done — `applyMutation` |
 
-`changes_requested` and `rebase` are **rejected up front** as unimplemented
-rather than half handled. Both continue a branch that already exists, which is a
-different job from starting one, and `changes_requested` is where decision 5's
-unresolved consent question lands.
+`changes_requested` is **rejected up front** as unimplemented rather than half
+handled: it needs the review findings in front of the model, and it is where
+decision 5's unresolved consent question lands. It no longer refuses silently —
+see "The rebase path" below for why that mattered.
+
+### The rebase path
+
+Built, and covered by tests that drive real git against real repositories
+(`BitbucketClient — rebase`). Never run live: it needs a genuinely conflicted
+pull request, which is the same gap READ FIRST item 1 flags for the watcher's
+conflict poll.
+
+What it does, in order: clone the existing branch at full depth →
+`rebaseOntoBase` → resolve each conflicted step with a model → `continueRebase`
+→ run the suite on the finished branch → lane guard → force-push → `Code
+Review`. No attempt is consumed anywhere in it.
+
+Four decisions in it worth not re-deriving:
+
+1. **The rebase is left in progress when it conflicts.** An earlier draft of
+   `rebaseOntoBase` said to abort before returning `conflicts` so the tree is
+   left clean. That is backwards: the conflicted tree *is* what the implementer
+   has to resolve, and aborting discards it along with git's record of which
+   commit was being replayed. The caller owns the in-progress state and must
+   `continueRebase` or `abortRebase`; nothing leaks past the run because the
+   workspace is a mkdtemp directory that dies with the task.
+2. **What the model wrote is checked before git is asked to stage it.**
+   `git add -A` believes whatever it is handed, so a file still full of
+   `<<<<<<<` stages, commits and pushes, and the result looks like a successful
+   rebase from every angle except reading the diff. `unresolvedPaths` also
+   rejects a conflicted path the model never *touched*, which is the case a
+   marker scan alone waves through — a binary conflict has no markers to find.
+3. **A failing suite is pushed anyway, then the ticket is failed.** The opposite
+   of the `initial` path, deliberately. There, discarding costs a branch that
+   never existed anywhere else; here the resolution is real work on a branch a
+   human is already looking at, and throwing it away means they redo the rebase
+   by hand. The reviewer is still never handed a branch whose suite fails.
+4. **The identity is set before the rebase, not just before a commit.** A rebase
+   re-commits every replayed change under the committer identity, the images
+   carry no global git config, and the failure git gives — "unable to
+   auto-detect email address" — reads like a credential problem.
+
+### What stranded KAN-6, and the shape to watch for
+
+The conflict was noticed correctly and dispatched correctly. The implementer
+then declined the work (`reason !== 'initial'`), returned `retryable: false`,
+and **wrote nothing** — so the consumer deleted the message as terminal and the
+ticket sat in `Implementing`, which `decide()` reads as "an agent owns this" and
+idles on forever. No DLQ, because the message was deliberately deleted; no
+alarm, because nothing failed; nothing on the card, because nothing was written.
+
+The comment at the rejection claimed leaving it in `Implementing` was "visible
+on the board rather than silently idle". It is not: `Implementing` is exactly
+what a healthy running agent looks like. **Every dead end must write a status
+the state machine can leave**, which is now what `failOnBoard` is for — and it
+re-reads the lane first, so a failure report cannot stomp a ticket a human took
+back mid-run.
 
 ### What the live run proved
 

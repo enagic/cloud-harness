@@ -13,13 +13,35 @@ FROM ${BASE_IMAGE}
 
 USER root
 
-RUN apt-get update \
+# JDK 21 comes from Adoptium, not from Debian. Bookworm ships openjdk-17 and
+# nothing newer — there is no openjdk-21 package in bookworm or in
+# bookworm-backports, so `apt-get install openjdk-21-jdk-headless` cannot
+# succeed here however it is spelled. The options were Temurin's apt repo, a
+# pinned tarball, or dropping to 17; Temurin keeps the version this image is
+# documented to carry and stays an apt package, so security updates arrive the
+# same way everything else in the image gets them.
+#
+# The key is stored ASCII-armored rather than dearmored, which apt has accepted
+# since 1.4 and which avoids pulling gnupg into the image for one command.
+#
+# Maven still comes from Debian: with Temurin already installed it satisfies
+# maven's java dependency, so apt adds no second JRE. Verify that if this
+# ordering ever changes — Debian's maven pulls openjdk-17-jre-headless and
+# default-jre-headless on its own, which is ~200 MB of a JVM nothing runs.
+RUN mkdir -p /etc/apt/keyrings \
+ && curl -fsSL https://packages.adoptium.net/artifactory/api/gpg/key/public \
+      -o /etc/apt/keyrings/adoptium.asc \
+ && echo "deb [signed-by=/etc/apt/keyrings/adoptium.asc] https://packages.adoptium.net/artifactory/deb bookworm main" \
+      > /etc/apt/sources.list.d/adoptium.list \
+ && apt-get update \
  && apt-get install -y --no-install-recommends \
-      openjdk-21-jdk-headless \
+      temurin-21-jdk \
       maven \
  && rm -rf /var/lib/apt/lists/*
 
-ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-arm64
+# arm64 because the task definitions pin Graviton and build-and-push.sh always
+# builds linux/arm64; this path carries the architecture in its name.
+ENV JAVA_HOME=/usr/lib/jvm/temurin-21-jdk-arm64
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
 # Most repos ship a Gradle wrapper (./gradlew) and should use it — a pinned

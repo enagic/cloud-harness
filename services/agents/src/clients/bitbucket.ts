@@ -2,8 +2,8 @@
  * Bitbucket, agent side — clone, push, PR lifecycle, rebase.
  *
  * IMPLEMENTED: everything the implementer and the reviewer need — clone, commit,
- * push, open a pull request, read its diff, read and write its comments, and
- * approve it. Rebase is the one remaining stub.
+ * push, open a pull request, read its diff, read and write its comments,
+ * approve it, and rebase onto the base branch.
  *
  * Two transports live in this one class and they authenticate differently.
  * Git over HTTPS takes the credential through GIT_ASKPASS (see withCredentials);
@@ -41,7 +41,7 @@ import {
   type RepositoryRef,
 } from '@cloud-harness/shared';
 
-import { runCommand } from '../runtime/exec.js';
+import { runCommand, type CommandResult } from '../runtime/exec.js';
 
 export interface PullRequest {
   id: number;
@@ -310,6 +310,20 @@ export class BitbucketClient {
   }
 
   /**
+   * Set the commit identity for this workspace.
+   *
+   * Required before anything that writes a commit, and a rebase is one of those
+   * — it re-commits every replayed change under the *committer* identity even
+   * though it keeps the original author. The agent images carry no global git
+   * config, so without this git refuses with "unable to auto-detect email
+   * address", which reads like a credential problem and is not one.
+   */
+  private async configureIdentity(workdir: string): Promise<void> {
+    await this.git(workdir, `config user.name ${shellQuote(`cloud-harness ${this.config.role}`)}`);
+    await this.git(workdir, `config user.email ${shellQuote(this.commitEmail)}`);
+  }
+
+  /**
    * Start a new branch off whatever is currently checked out.
    *
    * `checkout -B` rather than `-b`: a redelivered work item re-runs this against
@@ -335,8 +349,7 @@ export class BitbucketClient {
    * pipeline, so a human scanning history can tell at a glance.
    */
   async commitAll(workdir: string, message: string): Promise<CommitResult> {
-    await this.git(workdir, `config user.name ${shellQuote(`cloud-harness ${this.config.role}`)}`);
-    await this.git(workdir, `config user.email ${shellQuote(this.commitEmail)}`);
+    await this.configureIdentity(workdir);
 
     await this.git(workdir, 'add -A');
 
@@ -709,16 +722,154 @@ export class BitbucketClient {
   /**
    * Rebase the working branch onto its base.
    *
-   * TODO: `git fetch origin <base>` then `git rebase origin/<base>`.
-   *
    * Conflicts are the interesting case and the reason this returns a result
    * rather than throwing: a rebase that cannot be completed mechanically is
    * exactly when the implementer agent should take over and resolve it, and
-   * that resolution must NOT consume a review attempt. Abort the rebase before
-   * returning `conflicts` so the working tree is left clean.
+   * that resolution must NOT consume a review attempt.
+   *
+   * **The rebase is left in progress when it conflicts**, which is the one place
+   * this method departs from what an earlier draft of it asked for. That draft
+   * said to abort before returning `conflicts` so the tree is left clean — but
+   * the conflicted tree *is* the thing the implementer has to resolve, and
+   * aborting discards it along with git's record of which commit was being
+   * replayed. There is nothing to hand a model after an abort. The caller owns
+   * the in-progress state from here: resolve and `continueRebase`, or
+   * `abortRebase`. Neither leaks past the run, because the workspace is a
+   * mkdtemp directory that dies with the task.
+   *
+   * The clone is `--single-branch`, so the base branch is not in the workspace
+   * and the explicit refspec below is what puts it there — a bare
+   * `git fetch origin <base>` would update FETCH_HEAD and leave
+   * `refs/remotes/origin/<base>` missing, which is the ref the rebase names.
    */
-  async rebaseOntoBase(_workdir: string, _baseBranch: string): Promise<RebaseResult> {
-    throw new Error('BitbucketClient.rebaseOntoBase not implemented');
+  async rebaseOntoBase(workdir: string, baseBranch: string): Promise<RebaseResult> {
+    const ref = `refs/remotes/origin/${baseBranch}`;
+
+    await this.configureIdentity(workdir);
+
+    await this.withCredentials(async (env) =>
+      this.git(
+        workdir,
+        `fetch --no-tags origin ${shellQuote(`+refs/heads/${baseBranch}:${ref}`)}`,
+        env,
+      ),
+    );
+
+    // Exit 1 means "not an ancestor", which is a normal answer rather than a
+    // failure, so this cannot go through git() — it throws on any non-zero.
+    const contained = await runCommand(
+      `git merge-base --is-ancestor ${shellQuote(ref)} HEAD`,
+      { cwd: workdir, log: this.log, timeoutMs: GIT_TIMEOUT_MS },
+    );
+    if (contained.exitCode === 0) {
+      this.log.info('rebase not needed; base is already an ancestor', { baseBranch });
+      return { status: 'not_needed' };
+    }
+
+    const result = await runCommand(`git rebase ${shellQuote(ref)}`, {
+      cwd: workdir,
+      log: this.log,
+      timeoutMs: GIT_TIMEOUT_MS,
+    });
+
+    return await this.rebaseStepResult(workdir, result, `rebase onto ${baseBranch}`);
+  }
+
+  /**
+   * Stage the resolution and carry on replaying commits.
+   *
+   * A resolution that leaves nothing to commit is not an error and not
+   * something to force through: it means this commit's change is already in the
+   * base branch — somebody cherry-picked it, or the same edit arrived by
+   * another route — and `git rebase --continue` refuses precisely so a caller
+   * decides. Skipping is the right answer, and it is what a human does here.
+   *
+   * `core.editor=true` because both paths stop to edit a commit message
+   * otherwise, and there is no terminal to answer with.
+   */
+  async continueRebase(workdir: string): Promise<RebaseResult> {
+    await this.git(workdir, 'add -A');
+
+    const staged = await runCommand('git diff --cached --quiet', {
+      cwd: workdir,
+      log: this.log,
+      timeoutMs: GIT_TIMEOUT_MS,
+    });
+    const nothingToCommit = staged.exitCode === 0;
+
+    const command = nothingToCommit
+      ? 'git -c core.editor=true rebase --skip'
+      : 'git -c core.editor=true rebase --continue';
+
+    const result = await runCommand(command, {
+      cwd: workdir,
+      log: this.log,
+      timeoutMs: GIT_TIMEOUT_MS,
+    });
+
+    if (nothingToCommit) {
+      this.log.info('skipped a commit whose change is already in the base branch');
+    }
+
+    return await this.rebaseStepResult(workdir, result, 'rebase --continue');
+  }
+
+  /**
+   * Put the branch back the way it was. Best effort by design — it runs on the
+   * failure path, where the caller already has something worse to report and a
+   * second error from the cleanup would bury it.
+   */
+  async abortRebase(workdir: string): Promise<void> {
+    const result = await runCommand('git rebase --abort', {
+      cwd: workdir,
+      log: this.log,
+      timeoutMs: GIT_TIMEOUT_MS,
+    });
+    if (result.exitCode !== 0) {
+      this.log.warn('could not abort the rebase', { output: result.output.slice(-500) });
+      return;
+    }
+    this.log.info('aborted the rebase');
+  }
+
+  /**
+   * Read what one rebase step did: finished, stopped on conflicts, or broke.
+   *
+   * A non-zero exit with no unmerged paths is the third case and it must not be
+   * reported as a conflict — an unwritable directory or a rebase started on a
+   * dirty tree would otherwise be handed to a model as something to resolve,
+   * and it would find nothing to fix.
+   */
+  private async rebaseStepResult(
+    workdir: string,
+    result: CommandResult,
+    what: string,
+  ): Promise<RebaseResult> {
+    if (result.exitCode === 0) {
+      this.log.info('rebase step completed cleanly', { step: what });
+      return { status: 'clean' };
+    }
+
+    const paths = await this.unmergedPaths(workdir);
+    if (paths.length === 0) {
+      throw new Error(
+        `git ${what} failed (exit ${result.exitCode ?? 'null'}` +
+          `${result.timedOut ? ', timed out' : ''}) as the ${this.config.role} identity ` +
+          `with no conflicted paths to resolve: ${result.output.slice(-500)}`,
+      );
+    }
+
+    this.log.info('rebase stopped on conflicts', { step: what, paths });
+    return { status: 'conflicts', paths };
+  }
+
+  /** Repo-relative paths git is waiting on, mid-rebase. */
+  private async unmergedPaths(workdir: string): Promise<string[]> {
+    const output = await this.git(workdir, 'diff --name-only --diff-filter=U');
+    return output
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
   }
 
   /** Branch name derived from the issue key, so reruns land on the same branch. */

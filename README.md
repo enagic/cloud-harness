@@ -51,10 +51,11 @@ pieces fit together this way.
 | Stack images — base + node / python / jvm Dockerfiles | Complete |
 | Command execution (`runCommand`, `prepareRepo`) with timeout + abort | Complete |
 | Jira clients (read + write) | Complete, verified live |
-| Bitbucket clients (read + write) | Complete except `rebaseOntoBase` |
+| Bitbucket clients (read + write) | Complete |
 | Refiner | Complete, run live end to end |
 | Implementer — `initial` | Complete, run live end to end |
-| Implementer — `changes_requested` / `rebase` | **Stub**, rejected up front |
+| Implementer — `rebase` | Complete, tested; never run live |
+| Implementer — `changes_requested` | **Stub**; fails the ticket onto the board |
 | Reviewer | Complete; read half run live, write half never run |
 | Bedrock model client (`packages/shared/src/llm.ts`) | **Stub** — the AI SDK path in `runtime/model.ts` implements Bedrock |
 

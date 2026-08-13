@@ -115,9 +115,10 @@ export interface ImplementResult {
 /**
  * The story, plus what the implementer is being asked to do with it.
  *
- * Only the `initial` reason is built here. The other two continue a branch that
- * already exists and need the review findings or the conflict in front of the
- * model; handle.ts rejects them before this is called.
+ * Only the `initial` reason is built here. `rebase` continues an existing branch
+ * and needs the conflict rather than the story in front of the model, so it has
+ * its own prompt and its own smaller tool set in rebase.ts. `changes_requested`
+ * needs the review findings and is still rejected by handle.ts.
  */
 export function storyPrompt(item: ImplementWorkItem): string {
   return [

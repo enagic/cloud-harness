@@ -11,7 +11,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
@@ -140,6 +140,167 @@ describe('BitbucketClient — git', () => {
 
     const branch = await runCommand('git rev-parse --abbrev-ref HEAD', { cwd: workdir, log: silent });
     assert.equal(branch.output.trim(), 'agent/kan-6-add-a');
+  });
+});
+
+/**
+ * The rebase path, against two real repositories.
+ *
+ * A local repo stands in for Bitbucket and the workspace is a genuine
+ * `--single-branch` clone of it, which is the shape that matters: the base
+ * branch is not in the clone, so these exercise the explicit fetch refspec
+ * rather than assuming `origin/main` is lying around. Nothing here is stubbed —
+ * what a rebase does with two edits to one line is precisely the thing there is
+ * no point asserting against a fake.
+ */
+describe('BitbucketClient — rebase', () => {
+  let origin: string;
+  let workdir: string;
+  let client: BitbucketClient;
+
+  /** Commit `content` to `file` on the branch that is checked out in `dir`. */
+  const commit = async (dir: string, file: string, content: string, message: string) => {
+    await writeFile(join(dir, file), content);
+    await runCommand(
+      `git add -A && git -c user.email=t@example.com -c user.name=test commit -q -m ${JSON.stringify(message)}`,
+      { cwd: dir, log: silent },
+    );
+  };
+
+  const git = async (dir: string, command: string): Promise<string> =>
+    (await runCommand(`git ${command}`, { cwd: dir, log: silent })).output.trim();
+
+  const read = async (file: string): Promise<string> =>
+    await readFile(join(workdir, file), 'utf8');
+
+  beforeEach(async () => {
+    origin = await mkdtemp(join(tmpdir(), 'bb-origin-'));
+    workdir = await mkdtemp(join(tmpdir(), 'bb-rebase-'));
+    client = new BitbucketClient(config(), silent);
+
+    // main: one file, two lines. feature branches off it and edits line 2;
+    // main then moves on. Whether that overlaps is what each test decides.
+    await runCommand('git init -b main -q .', { cwd: origin, log: silent });
+    await commit(origin, 'app.ts', 'const version = 1;\nconst mode = "base";\n', 'initial');
+    await runCommand('git checkout -q -b feature', { cwd: origin, log: silent });
+    await commit(origin, 'app.ts', 'const version = 1;\nconst mode = "feature";\n', 'feature work');
+    await runCommand('git checkout -q main', { cwd: origin, log: silent });
+  });
+
+  afterEach(async () => {
+    await rm(origin, { recursive: true, force: true });
+    await rm(workdir, { recursive: true, force: true });
+  });
+
+  /** Clone `feature` into the empty workspace, the way the agent does. */
+  const cloneFeature = async (): Promise<void> => {
+    await runCommand(
+      `git clone -q --single-branch --branch feature ${JSON.stringify(origin)} ${JSON.stringify(workdir)}`,
+      { cwd: tmpdir(), log: silent },
+    );
+  };
+
+  it('reports that a branch already containing its base needs no rebase', async () => {
+    await cloneFeature();
+
+    const result = await client.rebaseOntoBase(workdir, 'main');
+
+    assert.deepEqual(result, { status: 'not_needed' });
+  });
+
+  it('replays the branch onto a base that moved without conflicting', async () => {
+    await commit(origin, 'README.md', '# widgets\n', 'unrelated work on main');
+    await cloneFeature();
+
+    const result = await client.rebaseOntoBase(workdir, 'main');
+
+    assert.deepEqual(result, { status: 'clean' });
+    // Both sides are present, and the branch's commit is on top.
+    assert.match(await read('app.ts'), /"feature"/);
+    assert.equal(await read('README.md'), '# widgets\n');
+    assert.match(await git(workdir, 'log -1 --format=%s'), /feature work/);
+  });
+
+  it('names the conflicted paths and leaves the rebase in progress', async () => {
+    await commit(origin, 'app.ts', 'const version = 1;\nconst mode = "main";\n', 'main moved');
+    await cloneFeature();
+
+    const result = await client.rebaseOntoBase(workdir, 'main');
+
+    assert.deepEqual(result, { status: 'conflicts', paths: ['app.ts'] });
+    // In progress, not aborted: the conflicted tree is what the implementer
+    // resolves, and an abort here would throw it away.
+    assert.match(await git(workdir, 'status'), /rebase in progress|interactive rebase/);
+    assert.match(await read('app.ts'), /^<{7}/m);
+  });
+
+  it('finishes the rebase once the conflict is resolved', async () => {
+    await commit(origin, 'app.ts', 'const version = 2;\nconst mode = "main";\n', 'main moved');
+    await cloneFeature();
+
+    const conflicted = await client.rebaseOntoBase(workdir, 'main');
+    assert.equal(conflicted.status, 'conflicts');
+
+    // What the model would have written: both intents kept.
+    await writeFile(join(workdir, 'app.ts'), 'const version = 2;\nconst mode = "feature";\n');
+
+    const result = await client.continueRebase(workdir);
+
+    assert.deepEqual(result, { status: 'clean' });
+    assert.equal(await read('app.ts'), 'const version = 2;\nconst mode = "feature";\n');
+    assert.equal(await git(workdir, 'status --porcelain'), '');
+    // The base commit is in the history, so the branch really was replayed.
+    assert.match(await git(workdir, 'log --format=%s'), /main moved/);
+  });
+
+  /**
+   * The resolution that leaves nothing to commit: the same change is already in
+   * the base branch. `git rebase --continue` refuses this, deliberately, so the
+   * client has to notice and skip instead.
+   */
+  it('skips a commit whose change is already in the base branch', async () => {
+    await commit(origin, 'app.ts', 'const version = 2;\nconst mode = "main";\n', 'main moved');
+    await cloneFeature();
+
+    const conflicted = await client.rebaseOntoBase(workdir, 'main');
+    assert.equal(conflicted.status, 'conflicts');
+
+    // Resolving in favour of what main already has leaves nothing to commit.
+    await writeFile(join(workdir, 'app.ts'), 'const version = 2;\nconst mode = "main";\n');
+
+    const result = await client.continueRebase(workdir);
+
+    assert.deepEqual(result, { status: 'clean' });
+    assert.equal(await git(workdir, 'status --porcelain'), '');
+    assert.equal(await git(workdir, 'rev-list --count HEAD'), '2');
+  });
+
+  it('puts the branch back when the rebase is aborted', async () => {
+    await commit(origin, 'app.ts', 'const version = 1;\nconst mode = "main";\n', 'main moved');
+    await cloneFeature();
+    const before = await git(workdir, 'rev-parse HEAD');
+
+    await client.rebaseOntoBase(workdir, 'main');
+    await client.abortRebase(workdir);
+
+    assert.equal(await git(workdir, 'rev-parse HEAD'), before);
+    assert.equal(await git(workdir, 'status --porcelain'), '');
+    assert.match(await read('app.ts'), /"feature"/);
+  });
+
+  /**
+   * The images carry no global git config, so a rebase that did not set an
+   * identity would fail with "unable to auto-detect email address" — which
+   * reads like a credential problem and is not one.
+   */
+  it('sets its own commit identity rather than relying on the host having one', async () => {
+    await commit(origin, 'README.md', '# widgets\n', 'unrelated work on main');
+    await cloneFeature();
+
+    const result = await client.rebaseOntoBase(workdir, 'main');
+
+    assert.deepEqual(result, { status: 'clean' });
+    assert.match(await git(workdir, 'config user.email'), /implementer@/);
   });
 });
 
