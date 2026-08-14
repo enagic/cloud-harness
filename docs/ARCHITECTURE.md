@@ -233,10 +233,10 @@ as above.
 
 **Nothing writes a counter.** The budget is computed on demand as:
 
-> transitions **into** `Changes Requested`, since the most recent transition
-> **into** `Ready for Implementation`
+> transitions **from** `In Progress` **into** `Code Review`, since the most
+> recent time a human ticked **DOR**
 
-read from the Jira issue changelog.
+read from the Jira issue changelog — both halves of it.
 
 **Why not a label or custom field.** Both are mutable by anyone with write
 access to the ticket, and neither records that they were changed. A stray label
@@ -248,31 +248,40 @@ author and timestamp.
 **Why this is better than merely tamper-resistant.** Counting the event we
 actually care about makes two properties fall out for free:
 
-- **The rebase exemption is structural.** A rebase moves the ticket through
-  `Rebase Required`, a different status, so it cannot be counted. There is no
-  conditional to break — a future refactor literally cannot reintroduce the bug.
-  A busy base branch would otherwise exhaust the entire budget without a single
-  review round trip, failing a PR for something the implementer never did wrong.
-- **The reset is a real, audited human action.** Sending a ticket back through
-  human gate 1 and re-approving it grants a fresh budget, because the reset
-  marker is the transition into `Ready for Implementation`. That is a named
-  account performing a named transition, permanently visible — as opposed to
-  someone quietly editing a number.
+- **The exemptions are structural.** Count the *edge*, not the destination. A
+  genuine attempt always arrives from `In Progress`; a rebase never leaves `Code
+  Review` and so produces no such edge, and neither does a consented fix, which
+  parks in the same column for the same reason. There is no conditional to break
+  — a future refactor literally cannot reintroduce the bug. A busy base branch
+  would otherwise exhaust the entire budget without a single review round trip,
+  failing a PR for something the implementer never did wrong.
 
-**Status IDs, not names.** The changelog records both `to` (ID) and `toString`
-(the display name *at the time of the transition*). Renaming a status rewrites
-neither, but name-based counting would break on the rename. `resolveStatusIds()`
-maps configured names to IDs once at startup and fails loudly if the board is
-missing one.
+  This is also why the gate-2 rebase, which arrives at `Code Review` from
+  `Validation`, needs no special case of its own.
+- **The reset is a real, audited human action.** Ticking `DOR` again grants a
+  fresh budget. Jira records custom field changes with author and timestamp
+  exactly as it records status changes, so that is a named account changing a
+  named field, permanently visible — as opposed to someone quietly editing a
+  number.
+
+**IDs, not names, on both halves.** The changelog records both `to` (ID) and
+`toString` (the display name *at the time of the transition*). Renaming a status
+rewrites neither, but name-based counting would break on the rename.
+`resolveStatusIds()` maps configured names to IDs once at startup and fails
+loudly if the board is missing one. DOR is resolved by `fieldId` for the same
+reason, and `verifyFields()` fails at startup on an id the site does not have —
+a mistyped custom field id is not an error to Jira, it is simply absent from
+every response, which reads as "DOR was never ticked" forever.
 
 **Cost.** The changelog is a per-issue API call, so `needsHistory()` gates it to
-the three statuses whose decision actually depends on the count. Everything else
-decides from status alone, and a typical tick makes one search call plus a
-handful of changelog fetches.
+the tickets whose decision actually depends on the count: anything in `Code
+Review` or `Validation`, and anything in `In Progress` that already has a pull
+request. An `In Progress` ticket with no pull request is the first pass off gate
+1, and the DOR tick that put it there is also the reset — the count is zero by
+construction and not worth a call.
 
-**What this does not defend against.** Someone with transition rights can drag a
-ticket straight into `Ready for Implementation` to reset the budget. That is an
-authorised action by design — but unlike a label edit, it is recorded, attributed,
+**What this does not defend against.** Someone who can edit `DOR` can untick and
+re-tick it to reset the budget. That is an authorised action by design — but unlike a label edit, it is recorded, attributed,
 and visible in the ticket's history. Jira project permissions are the control
 here; the changelog is the audit trail.
 
@@ -286,9 +295,10 @@ list** — nothing an agent wrote into a mutable field is load-bearing.
 
 Conflicts have no Jira-side signal — nothing about the ticket changes when
 someone else merges to the base branch. The only way to notice is to ask
-Bitbucket, so the watcher polls PR state for tickets that have one and applies
-`reconcilePullRequest`, which also catches the human's merge and closes the
-ticket.
+Bitbucket, so the watcher polls PR state for every ticket that has one. What it
+learns goes two ways: mergeability rides onto the snapshot for `decide()`, and
+`reconcilePullRequest` catches the two things that end a ticket — the human's
+merge, and a declined pull request.
 
 Two guards worth knowing about:
 
@@ -297,11 +307,16 @@ Two guards worth knowing about:
   spurious rebase on every fresh PR.
 - **Conflicts are ignored while an agent holds the branch.** Queuing a rebase
   under a running implementer or reviewer would put two tasks on one branch.
+  That guard is now the in-flight marker in `decide()` rather than a rule in
+  `reconcilePullRequest`: conflict state travels on the snapshot, so a rebase is
+  dispatched by the state machine like everything else and the ticket never
+  leaves `Code Review` to have one.
 
 ## Why state lives on the Jira board
 
-There is no database. Workflow state is the ticket status; human intent is a
-label; everything else is derived from history (above).
+There is no database. Workflow state is the ticket's column plus three of its
+fields; human intent is a label; everything else is derived from history
+(above).
 
 Both services are therefore stateless and restart cleanly, and a human can
 drive, retry, or override any transition from the Jira UI — including replaying

@@ -4,13 +4,20 @@
  * The only long-running component, and the only thing that talks to Jira on a
  * schedule. Each tick it:
  *
- *   1. Rehydrates each ticket's derived state — the attempt budget from the
- *      Jira changelog, the PR from Bitbucket. Nothing the pipeline depends on
- *      is stored in a mutable field.
- *   2. Reconciles open PRs (merge conflicts and human merges have no Jira-side
- *      signal, so they can only be discovered by asking Bitbucket).
+ *   1. Rehydrates each ticket's derived state — the pull request and its
+ *      conflict state from Bitbucket, the attempt budget from the Jira
+ *      changelog. Neither is stored in a mutable field, so a hand-edited ticket
+ *      cannot grant extra attempts or claim a branch merges cleanly.
+ *   2. Reconciles the two things that end a ticket — a human's merge and a
+ *      declined pull request. Both have no Jira-side signal, so they can only
+ *      be discovered by asking Bitbucket.
  *   3. Runs the state machine and dispatches to whichever agent queue the
  *      decision names.
+ *
+ * Most dispatches no longer move the card. The stage lives in the column and
+ * the rest of the state lives on Assignee, Code Reviewer and DOR, so taking a
+ * ticket is usually a field write rather than a transition — see
+ * @cloud-harness/shared/pipeline.
  *
  * It holds no workflow logic of its own — that lives in
  * @cloud-harness/shared/pipeline, which is pure and tested. This file is I/O
@@ -36,6 +43,7 @@ import {
   reconcilePullRequest,
   requireEnv,
   type PipelineConfig,
+  type PullRequestState,
   type RepositoryRef,
   type StatusIds,
   type TicketSnapshot,
@@ -64,42 +72,62 @@ interface Deps {
  * Fill in the parts of a snapshot that are derived rather than stored.
  *
  * The attempt budget comes from the changelog, which users cannot rewrite, and
- * the PR comes from Bitbucket by branch convention. Neither is read from a
- * mutable Jira field, so a deleted label or a hand-edited custom field cannot
- * grant an agent extra attempts or hide a PR.
+ * everything about the pull request comes from Bitbucket — found by branch
+ * convention, then re-read for its real state. Neither is trusted from a
+ * mutable Jira field, so a hand-edited ticket cannot grant an agent extra
+ * attempts, hide a pull request, or claim one merges cleanly when it does not.
  *
- * The changelog is a per-issue call, so it is fetched only for tickets whose
- * decision actually depends on the count.
+ * Order matters here: the pull request is looked up first because whether the
+ * changelog is worth fetching now depends on whether one exists.
+ *
+ * The fetched PR is returned alongside so reconcile() does not fetch it again.
+ * `decide()` needs its mergeability and reconcile() needs its state, and that
+ * used to be two calls per ticket per tick for the same object.
  */
-async function rehydrate(ticket: TicketSnapshot, deps: Deps): Promise<TicketSnapshot> {
+async function rehydrate(
+  ticket: TicketSnapshot,
+  deps: Deps,
+): Promise<{ ticket: TicketSnapshot; pr?: PullRequestState }> {
   const hydrated: TicketSnapshot = { ...ticket };
 
-  if (needsHistory(ticket.status, deps.config)) {
-    const history = await deps.jira.getStatusHistory(ticket.issueKey);
+  const found = await deps.bitbucket.findPullRequestForIssue(deps.repository, ticket.issueKey);
+  let pr: PullRequestState | undefined;
+
+  if (found !== undefined) {
+    hydrated.pullRequestUrl = found.url;
+    hydrated.pullRequestId = found.id;
+    hydrated.branch = found.branch;
+
+    // The lookup does not report conflict state — see findPullRequestForIssue,
+    // which fills `mergeable: true` as a placeholder nothing may read. This is
+    // the call that answers it, and it answers `undefined` for everything it
+    // cannot be sure of.
+    pr = await deps.bitbucket.getPullRequest(deps.repository, found.id);
+    if (pr !== undefined) hydrated.pullRequestMergeable = pr.mergeable;
+  }
+
+  if (needsHistory(hydrated, deps.config)) {
+    const history = await deps.jira.getIssueHistory(ticket.issueKey);
     hydrated.attempts = countAttempts(history, deps.statusIds);
   }
 
-  const pr = await deps.bitbucket.findPullRequestForIssue(deps.repository, ticket.issueKey);
-  if (pr !== undefined) {
-    hydrated.pullRequestUrl = pr.url;
-    hydrated.pullRequestId = pr.id;
-    hydrated.branch = pr.branch;
-  }
-
-  return hydrated;
+  return pr === undefined ? { ticket: hydrated } : { ticket: hydrated, pr };
 }
 
 /**
  * Apply any PR-driven status change. Returns true if the ticket was mutated, in
  * which case the caller skips the state machine this tick — the snapshot is now
  * stale, and the next tick acts on the new status.
+ *
+ * Only a merge and a decline reach here now. A conflict used to as well, as a
+ * transition into a `Rebase Required` status; it travels on the snapshot
+ * instead, so the rebase happens without the ticket leaving Code Review.
  */
-async function reconcile(ticket: TicketSnapshot, deps: Deps): Promise<boolean> {
-  if (ticket.pullRequestId === undefined) return false;
-
-  const pr = await deps.bitbucket.getPullRequest(deps.repository, ticket.pullRequestId);
-  // undefined covers "Bitbucket has not computed mergeability yet". Treating
-  // that as conflicted would queue a spurious rebase on every fresh PR.
+async function reconcile(
+  ticket: TicketSnapshot,
+  pr: PullRequestState | undefined,
+  deps: Deps,
+): Promise<boolean> {
   if (pr === undefined) return false;
 
   const mutation = reconcilePullRequest(ticket, pr, deps.config);
@@ -123,9 +151,9 @@ async function tick(deps: Deps): Promise<void> {
     const ticketLog = log.child({ issueKey: raw.issueKey });
 
     try {
-      const ticket = await rehydrate(raw, deps);
+      const { ticket, pr } = await rehydrate(raw, deps);
 
-      if (await reconcile(ticket, deps)) continue;
+      if (await reconcile(ticket, pr, deps)) continue;
 
       const action = decide(ticket, deps.config);
 
@@ -157,7 +185,7 @@ async function tick(deps: Deps): Promise<void> {
       );
       if (!runtime.ok) {
         await deps.jira.applyMutation(ticket.issueKey, {
-          status: deps.config.statuses.failed,
+          status: deps.config.statuses.blocked,
           comment: `Cannot determine how to build this repository: ${runtime.error}`,
         });
         ticketLog.error('runtime resolution failed', { error: runtime.error });
@@ -189,8 +217,13 @@ async function tick(deps: Deps): Promise<void> {
         agent: item.agent,
         stack: item.runtime.stack,
         stackSource: runtime.source,
+        // `to` is absent whenever the stage does not change column, which is
+        // most of them now — a rebase and a send-back both dispatch without
+        // moving the card, and the marker below is what actually changed.
         from: ticket.status,
-        to: action.mutation.status,
+        to: action.mutation.status ?? ticket.status,
+        marker: action.mutation.codeReviewer !== undefined ? 'codeReviewer' : 'assignee',
+        reason: action.kind === 'dispatch_implement' ? action.reason : undefined,
         attempts: ticket.attempts,
       });
     } catch (err) {
@@ -228,9 +261,12 @@ async function main(): Promise<void> {
     stackDefaults: loadStackDefaults(),
   };
 
-  // Resolved once, at startup. Fails fast and loudly if the board is missing a
-  // configured status, rather than one ticket at a time in production.
+  // Resolved once, at startup. Both fail fast and loudly if the board is
+  // missing a configured status or field, rather than one ticket at a time in
+  // production — and a mistyped field id is the quieter of the two failures,
+  // because Jira simply omits an unknown field rather than complaining.
   const statusIds = await jira.resolveStatusIds();
+  await jira.verifyFields();
 
   const deps: Deps = { jira, bitbucket, queues, config, statusIds, repository, runtimeOptions };
 

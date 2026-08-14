@@ -92,7 +92,7 @@ outputs: ## Show terraform outputs
 	cd infra && terraform output
 
 .PHONY: workflow
-workflow: ## Print the Jira statuses and labels this deployment expects
+workflow: ## Print the Jira columns, label and fields this deployment expects
 	cd infra && terraform output jira_workflow
 
 # --- Operations -------------------------------------------------------------

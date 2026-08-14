@@ -17,6 +17,7 @@ import {
   textToAdf,
   type JiraConfig,
   type Logger,
+  type PipelineConfig,
   type TicketMutation,
 } from '@cloud-harness/shared';
 
@@ -32,16 +33,35 @@ export class JiraError extends Error {
   }
 }
 
-/** The two fields the lane guard needs. Deliberately not a TicketSnapshot —
- *  the agent has no business reading the board generally. */
+/**
+ * What the lane guard needs, and nothing else. Deliberately not a
+ * TicketSnapshot — the agent has no business reading the board generally.
+ *
+ * The two in-flight markers are here because the column alone no longer says
+ * whether this run is still the one in flight. Four states share Code Review
+ * and three share To Do, and what tells them apart is who holds the card.
+ */
 export interface LaneState {
   status: string;
   labels: string[];
+  assigneeAccountId?: string;
+  codeReviewerAccountId?: string;
+}
+
+/** The refiner's product, beyond the story itself. */
+export interface RefinementFields {
+  /** The prose story, replacing the description. */
+  story: string;
+  /** Fibonacci. The workflow requires it before In Progress; absent if unsized. */
+  storyPoints?: number;
+  /** The criteria list, for the Acceptance Criteria field. */
+  acceptanceCriteria?: string;
 }
 
 export class JiraWriter {
   constructor(
     private readonly config: JiraConfig,
+    private readonly pipeline: PipelineConfig,
     private readonly log: Logger,
   ) {}
 
@@ -90,54 +110,102 @@ export class JiraWriter {
    * gap between two calls.
    */
   async readLaneState(issueKey: string): Promise<LaneState> {
+    const reviewerField = this.pipeline.fields.codeReviewer;
     const issue = await this.request<{
-      fields?: { status?: { name?: string }; labels?: string[] };
-    }>(`/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=status,labels`);
+      fields?: {
+        status?: { name?: string };
+        labels?: string[];
+        assignee?: { accountId?: string } | null;
+      } & Record<string, unknown>;
+    }>(
+      `/rest/api/3/issue/${encodeURIComponent(issueKey)}` +
+        `?fields=status,labels,assignee,${encodeURIComponent(reviewerField)}`,
+    );
 
-    return {
+    const state: LaneState = {
       status: issue.fields?.status?.name ?? '',
       labels: issue.fields?.labels ?? [],
     };
+
+    const assignee = issue.fields?.assignee?.accountId;
+    if (typeof assignee === 'string') state.assigneeAccountId = assignee;
+
+    const reviewer = issue.fields?.[reviewerField];
+    if (typeof reviewer === 'object' && reviewer !== null) {
+      const accountId = (reviewer as { accountId?: unknown }).accountId;
+      if (typeof accountId === 'string') state.codeReviewerAccountId = accountId;
+    }
+
+    return state;
   }
 
   /**
-   * Writes the refined story into the description, replacing what is there.
+   * Writes the refined story into the description, plus the two fields the
+   * board itself needs, in one call.
    *
    * Replacing is the whole contract. The description is where the story lives,
    * a human edits it in place at the review gate, and a ticket that accumulated
    * every draft would be unreadable within three passes. A human who edited
    * while the ticket was in the agent lane loses that edit — deliberately; Jira
    * keeps the previous value in the issue history if they need it back.
+   *
+   * Story Points and Acceptance Criteria are written here rather than left in
+   * prose because the workflow has required-field validators on them: without a
+   * number in the field, gate 1 cannot be passed at all, and a human would be
+   * hand-entering one on every single ticket. Story Points is omitted when the
+   * model did not size the work — a wrong number in a gated field is worse than
+   * an empty one, which at least stops the ticket where a person will see it.
    */
-  async publishRefinement(issueKey: string, story: string): Promise<void> {
+  async publishRefinement(issueKey: string, refinement: RefinementFields): Promise<void> {
+    const fields: Record<string, unknown> = {
+      description: textToAdf(refinement.story),
+    };
+    if (refinement.storyPoints !== undefined) {
+      fields[this.pipeline.fields.storyPoints] = refinement.storyPoints;
+    }
+    if (refinement.acceptanceCriteria !== undefined) {
+      fields[this.pipeline.fields.acceptanceCriteria] = textToAdf(refinement.acceptanceCriteria);
+    }
+
     await this.request(`/rest/api/3/issue/${encodeURIComponent(issueKey)}`, {
       method: 'PUT',
-      body: { fields: { description: textToAdf(story) } },
+      body: { fields },
     });
-    this.log.info('published refinement', { issueKey, chars: story.length });
+    this.log.info('published refinement', {
+      issueKey,
+      chars: refinement.story.length,
+      storyPoints: refinement.storyPoints,
+      criteria: refinement.acceptanceCriteria !== undefined,
+    });
   }
 
   /**
-   * Labels, then comment, then status.
+   * Comment, then fields and labels, then status.
    *
-   * Status goes LAST so a partial failure leaves the ticket in its old column
-   * and the redelivered work item retries cleanly.
+   * Every step in that order is chosen so a partial failure leaves the ticket
+   * somewhere the next tick handles correctly, and two of the three are load
+   * bearing rather than tidy.
+   *
+   * **The comment goes FIRST**, which is not where it used to be. The refiner's
+   * hand-back comment is what tells the state machine this ticket has been
+   * refined, and releasing the Assignee is what tells it no agent is working on
+   * it. Do those in the other order and there is a window — one HTTP call wide,
+   * but the watcher ticks on a timer and will eventually land in it — where the
+   * ticket reads as an unrefined draft nobody is holding, and gets refined all
+   * over again.
+   *
+   * **Status goes LAST** so a partial failure leaves the ticket in its old
+   * column and the redelivered work item retries cleanly.
+   *
+   * The in-flight markers matter most on the way out: an agent that finishes
+   * without releasing Assignee (or Code Reviewer) leaves the board saying it is
+   * still working, and `decide()` believes the board. Clearing is an explicit
+   * null — an omitted key leaves the field untouched, which is not the same
+   * thing.
    */
   async applyMutation(issueKey: string, mutation: TicketMutation): Promise<void> {
     const key = encodeURIComponent(issueKey);
-
-    // One call for both directions: two can interleave with a human edit and
-    // lose a label.
-    const labelOps = [
-      ...(mutation.addLabels ?? []).map((label) => ({ add: label })),
-      ...(mutation.removeLabels ?? []).map((label) => ({ remove: label })),
-    ];
-    if (labelOps.length > 0) {
-      await this.request(`/rest/api/3/issue/${key}`, {
-        method: 'PUT',
-        body: { update: { labels: labelOps } },
-      });
-    }
+    const bot = this.pipeline.fields.botAccountId;
 
     // Signed on the way out. The refiner reads this thread back on its next
     // pass and has to tell its own questions from the answers; it cannot do that
@@ -148,6 +216,29 @@ export class JiraWriter {
         method: 'POST',
         body: { body: textToAdf(signAgentComment(mutation.comment)) },
       });
+    }
+
+    // One call for all of it: separate calls can interleave with a human edit,
+    // and the label update in particular can lose a label.
+    const update: Record<string, unknown> = {};
+
+    const labelOps = [
+      ...(mutation.addLabels ?? []).map((label) => ({ add: label })),
+      ...(mutation.removeLabels ?? []).map((label) => ({ remove: label })),
+    ];
+    if (labelOps.length > 0) update['labels'] = labelOps;
+
+    if (mutation.assignee !== undefined) {
+      update['assignee'] = [{ set: mutation.assignee === 'bot' ? { accountId: bot } : null }];
+    }
+    if (mutation.codeReviewer !== undefined) {
+      update[this.pipeline.fields.codeReviewer] = [
+        { set: mutation.codeReviewer === 'bot' ? { accountId: bot } : null },
+      ];
+    }
+
+    if (Object.keys(update).length > 0) {
+      await this.request(`/rest/api/3/issue/${key}`, { method: 'PUT', body: { update } });
     }
 
     if (mutation.status) {

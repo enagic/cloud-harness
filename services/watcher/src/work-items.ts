@@ -49,6 +49,11 @@ export function buildWorkItem(
         draftDescription: ticket.description,
       };
       if (ticket.conversation?.length) item.conversation = ticket.conversation;
+      // Present only on a second pass, and the refiner improves it rather than
+      // starting over — same contract as the description.
+      if (ticket.acceptanceCriteria !== undefined) {
+        item.draftAcceptanceCriteria = ticket.acceptanceCriteria;
+      }
       return item;
     }
 
@@ -61,6 +66,13 @@ export function buildWorkItem(
         attempt: action.attempt,
         maxAttempts,
       };
+
+      // Carried, not parsed. This is a board field's contents travelling as
+      // text — the watcher has no more opinion about what is inside it than it
+      // has about the description.
+      if (ticket.acceptanceCriteria !== undefined) {
+        item.acceptanceCriteria = ticket.acceptanceCriteria;
+      }
 
       // Everything except the first pass continues an existing branch.
       if (ticket.branch !== undefined) item.existingBranch = ticket.branch;
@@ -105,6 +117,10 @@ export function buildWorkItem(
         attempt: action.attempt,
         maxAttempts,
       };
+      // The checklist the review is verified against, when the refiner wrote one.
+      if (ticket.acceptanceCriteria !== undefined) {
+        item.acceptanceCriteria = ticket.acceptanceCriteria;
+      }
       return item;
     }
 

@@ -121,7 +121,7 @@ export interface ImplementResult {
  * needs the review findings and is still rejected by handle.ts.
  */
 export function storyPrompt(item: ImplementWorkItem): string {
-  return [
+  const parts = [
     `Ticket: ${item.issueKey}`,
     `Title: ${item.title}`,
     `Repository: ${item.repository.workspace}/${item.repository.slug}`,
@@ -131,7 +131,23 @@ export function storyPrompt(item: ImplementWorkItem): string {
     'The approved story. This is the spec:',
     '',
     item.refinedDescription.trim() || '(the story is empty)',
-  ].join('\n');
+  ];
+
+  // The criteria live in their own board field rather than in the story, so
+  // they arrive separately and are stated separately: these are the conditions
+  // the reviewer will work through one at a time.
+  const criteria = item.acceptanceCriteria?.trim();
+  if (criteria) {
+    parts.push(
+      '',
+      'The acceptance criteria a human approved. Your change is done when every one',
+      'of these is true, and the reviewer checks them individually:',
+      '',
+      criteria,
+    );
+  }
+
+  return parts.join('\n');
 }
 
 /**

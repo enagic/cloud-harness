@@ -44,7 +44,7 @@ pieces fit together this way.
 |---|---|
 | Terraform — VPC, ECS, 3 queues + DLQs, IAM, ECR, secrets, alarms | Complete |
 | Dispatcher Lambdas (×3) | Complete |
-| **Pipeline state machine** — attempt counter, rebase exemption, gates | Complete, tested (19 tests) |
+| **Pipeline state machine** — attempt counter, rebase exemption, gates | Complete, tested (42 tests) |
 | Watcher poll loop, reconciliation, dispatch | Complete |
 | Agent SQS consume loop, visibility heartbeat, retry semantics | Complete |
 | **Repo manifest** — `.cloud-harness.yml` parsing, stack defaults | Complete, tested |
@@ -60,9 +60,9 @@ pieces fit together this way.
 | Bedrock model client (`packages/shared/src/llm.ts`) | **Stub** — the AI SDK path in `runtime/model.ts` implements Bedrock |
 
 Every remaining stub throws with a `TODO` naming the decisions to settle first.
-A ticket can go To Do → Refining → Refinement Review → Ready for Implementation
-→ Implementing → Code Review with a real pull request behind it, all of it
-against live Jira and live Bitbucket.
+A ticket can go from a rough draft in To Do, through refinement and human gate
+1, to In Progress and out again to Code Review with a real pull request behind
+it, all of it against live Jira and live Bitbucket.
 
 ```bash
 npm test   # the state machine, including the rules that are easy to get wrong
@@ -86,23 +86,41 @@ scripts/                   Secret population, image build/push
 
 ## Jira workflow
 
-The pipeline drives Jira **status**; humans signal intent with **labels**. Every
-name is configurable in `terraform.tfvars` — these must already exist on the
-board, because Jira resolves transitions by name and a mismatch is a ticket that
+**Status is not the whole state.** A real board has seven generic columns and no
+admin rights to add more, so the pipeline splits its state across the column and
+three fields that already mean what it needs them to mean. Every name and id is
+configurable in `terraform.tfvars` — all of it must already exist on the board,
+because Jira resolves transitions by name and a mismatch is a ticket that
 silently never moves.
 
-| Status | Meaning | Set by |
+| Axis | Where it lives | Meaning |
 |---|---|---|
-| `Refining` | Refiner working | Watcher |
-| `Refinement Review` | **Human gate 1** | Refiner |
-| `Ready for Implementation` | Approved | Human |
-| `Implementing` | Implementer working | Watcher |
-| `Code Review` | PR up — triggers reviewer | Implementer |
-| `Reviewing` | Reviewer working | Watcher |
-| `Changes Requested` | Back to implementer (+1 attempt) | Reviewer |
-| `Rebase Required` | Back to implementer (no attempt) | Watcher |
-| `Awaiting Merge` | **Human gate 2**, PR approved | Reviewer |
-| `Done` / `Agent Failed` | Terminal | Watcher |
+| Stage | Column | What kind of work this is |
+| Who holds the code | **Assignee** | The bot account = an agent is executing |
+| Who holds the review | **Code Reviewer** | Bot = reviewer running; a human = gate 2 |
+| Gate 1 passed | **DOR** | Story approved, attempt budget granted |
+| Consent | `agent` label | Whether the pipeline may act at all |
+
+Plus Bitbucket, which the watcher polls anyway: whether a pull request exists,
+merges cleanly, merged, or was declined.
+
+| Column | Holds | Told apart by |
+|---|---|---|
+| `To Do` | Drafting, refining, **human gate 1** | DOR, Assignee, the comment thread |
+| `In Progress` | The implementer's turn, and its run | Assignee |
+| `Code Review` | Awaiting review, reviewing, awaiting rebase, rebasing | Code Reviewer, Assignee, PR conflicts |
+| `Validation` | **Human gate 2** — QA, then the merge | — |
+| `Done` / `Blocked` / `Closed` | Terminal | — |
+
+Two consequences worth knowing before you use the board:
+
+- **A rebase never leaves `Code Review`.** It is a branch refresh, not a new
+  implementation attempt, and the ticket really is still in code review while it
+  happens. That is also what keeps it off the attempt budget — see below.
+- **`Story Points` and `DOR` are required by the workflow before `In Progress`**,
+  so an unrefined story physically cannot be started. That is a harder guarantee
+  than any amount of pipeline code could give, and it is why gate 1 needs no
+  column of its own.
 
 ### Two lanes, one label
 
@@ -135,51 +153,66 @@ state is stored in them — see below.
 
 ### Human gate 1: reviewing a refinement
 
-A ticket in `Refinement Review` has the refined story in its **description** and
-nothing else. That story is the spec — it is what the implementer builds and
-what the reviewer tests against — so it holds the work and none of the
-conversation about it. It ends with the refiner's own read on itself:
+A refined ticket sits in `To Do`, unassigned, with the story in its
+**description**, the criteria in **Acceptance Criteria**, a number in **Story
+Points**, and a comment from the pipeline. The story is the spec — it is what
+the implementer builds and what the reviewer tests against — so it holds the
+work and none of the conversation about it. It ends with the refiner's own read
+on itself:
 
 ```
 ## Estimate
 
 Confidence: medium — the retention window is a guess; see "Cleanup" above.
-Story points: 5 — one new handler plus its tests, in a module that already exists.
 ```
 
-Neither number blocks anything. They are there so you can tell a confident story
-from a plausible one without re-deriving the ticket yourself. Anything the
-refiner could not settle is a **comment**, numbered, not in the story.
+That does not block anything. It is there so you can tell a confident story from
+a plausible one without re-deriving the ticket yourself. Anything the refiner
+could not settle is a **comment**, numbered, not in the story.
 
 Everything the pipeline writes is signed with a `— cloud-harness` line. That is
 how the refiner tells its own questions from your answers when it reads the
 thread back, and it is not decoration: the pipeline has one Jira account, and if
 you point it at your own, the board is otherwise a conversation with yourself.
 
-To answer: reply in the comments and move the ticket back to a draft column
-(`Backlog` / `To Do`), still in the agent lane. That re-dispatches the refiner,
-which reads the whole thread, folds your answers into the story as though they
-had always been in the draft, and moves it back to `Refinement Review`. Editing
-the description yourself works too — move to the human lane first, then back.
+**To answer: reply in a comment.** That is the whole gesture — the ticket does
+not move, because with drafting and gate 1 in the same column there is nowhere
+to move it to. A human comment newer than the pipeline's last one is the signal,
+and the refiner reads the whole thread, folds your answers into the story as
+though they had always been in the draft, and hands back again.
 
-To approve, move it to `Ready for Implementation`.
+> The cost, stated plainly: **any comment on a ticket waiting at gate 1
+> re-triggers refinement**, even an aside. It is cheap and idempotent — the
+> second pass improves the story with the whole thread in hand — but it is
+> surprising the first time.
+
+Editing the story yourself works too: move to the human lane first, then back.
+
+**To approve, tick `DOR`.** That is gate 1, and it is also the moment the
+attempt budget is granted.
 
 ### The attempt budget is derived, not stored
 
 Nothing writes a counter anywhere. The budget is computed from the Jira
-changelog as *transitions into `Changes Requested` since the last transition
-into `Ready for Implementation`*.
+changelog as *`In Progress` → `Code Review` transitions since the last time DOR
+was ticked*.
 
-A label or custom field would be editable by anyone with write access to the
-ticket, with no record that it changed. The changelog cannot be edited or
-deleted through Jira's UI or REST API, and every entry is attributed.
+A label or a counter field would be editable by anyone with write access to the
+ticket, with no record of how it got to its current value. The changelog cannot
+be edited or deleted through Jira's UI or REST API, and every entry is
+attributed.
 
-Counting the real event also makes two things fall out for free:
+**Count the edge, not the destination.** A genuine attempt always arrives from
+`In Progress`, and that one rule carries every exemption structurally rather
+than by a conditional a future change could break:
 
-- **Rebases cannot consume budget** — they move through a different status, so
-  there is no conditional that a future change could break.
-- **Re-approving at human gate 1 grants a fresh budget**, and that reset is a
-  named account performing a named transition, permanently visible in history.
+- **A rebase cannot consume budget** — it never leaves `Code Review`, so there
+  is no edge to count. The gate-2 rebase arrives from `Validation` and is
+  excluded by the same test.
+- **Nor can a consented fix**, for exactly the same reason: it parks in `Code
+  Review` too, so it needs neither its own reason nor a flag.
+- **Ticking DOR again grants a fresh budget**, and that reset is a named account
+  changing a named field, permanently visible in history.
 
 The same idea covers the PR: it is located in Bitbucket by the
 `agent/<issue-key>-*` branch convention rather than read from a Jira link. Every
@@ -243,7 +276,7 @@ Three separate credentials, one per identity — not one per deployment:
 production.** Bitbucket does not count an approval from a pull request's own
 author towards a minimum-approval merge check. Share one account between them
 and the reviewer's `approve` call returns 200, the approval does not count, and
-the ticket sits in `Awaiting Merge` with nothing in the logs to explain why —
+the ticket sits in `Validation` with nothing in the logs to explain why —
 the failure looks identical to success.
 
 There is deliberately no fallback between the three environment variables. A
@@ -331,12 +364,14 @@ already covers interruptions). To harden: `single_nat_gateway = false`.
 These were unspecified and I picked a default rather than blocking:
 
 1. **The attempt budget is derived from the Jira changelog**, not stored — see
-   above. The remaining exposure is that anyone who can transition a ticket into
-   `Ready for Implementation` resets the budget; that is authorised by design and
-   is recorded, but Jira project permissions are the only control on *who* can.
-2. **Statuses drive the machine, labels carry human intent.** Your description
-   mixed both ("adds a label", "code review status"), so I used statuses for the
-   pipeline and labels for the two human signals plus the counter.
+   above. The remaining exposure is that anyone who can tick `DOR` resets the
+   budget; that is authorised by design and is recorded, but Jira project
+   permissions are the only control on *who* can.
+2. **The board's own fields drive the machine, and the label carries consent.**
+   Your description mixed both ("adds a label", "code review status"). Statuses
+   alone could not carry it: production has seven generic columns and no admin
+   rights to add more, so the stage lives in the column and the rest lives on
+   Assignee, Code Reviewer and DOR — fields a team already reads.
 3. **The refined story's structured form is unsolved.** The refiner writes to
    Jira and the implementer and reviewer need it back out machine-readable. I
    recommend a fenced JSON block under a known heading; `parseRefinedStory` in

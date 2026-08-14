@@ -134,9 +134,9 @@ export async function handleReview(
 ): Promise<ReviewOutcome> {
   const { item, log } = ctx;
 
-  const bitbucket = new BitbucketClient(loadBitbucketConfig('reviewer'), log);
-  const jira = new JiraWriter(loadJiraConfig(), log);
   const pipeline = loadPipelineConfig();
+  const bitbucket = new BitbucketClient(loadBitbucketConfig('reviewer'), log);
+  const jira = new JiraWriter(loadJiraConfig(), pipeline, log);
   const model = createAgentModel(loadLlmConfig(), log);
 
   log.info('reviewing', {
@@ -195,14 +195,19 @@ export async function handleReview(
 
     // The lane guard. Consent is re-read here rather than trusted from dispatch,
     // because the work item is many minutes old by now and a human can have
-    // taken the ticket back while the model was reading. Both conditions matter:
-    // the label says the agents are still welcome, the column says this run is
-    // still the one in flight.
+    // taken the ticket back while the model was reading.
+    //
+    // Three conditions. The label says the agents are still welcome; the column
+    // says the ticket has not moved on; and **Code Reviewer**, not Assignee,
+    // says this run is the one in flight. Two fields for two roles is what lets
+    // one column hold a review and a rebase at the same time without either
+    // agent mistaking the other's run for its own.
     const lane = await jira.readLaneState(item.issueKey);
     const inAgentLane = lane.labels.includes(pipeline.labels.agentLane);
-    const stillReviewing = lane.status === pipeline.statuses.reviewing;
+    const stillInColumn = lane.status === pipeline.statuses.codeReview;
+    const stillOurs = lane.codeReviewerAccountId === pipeline.fields.botAccountId;
 
-    if (!inAgentLane || !stillReviewing) {
+    if (!inAgentLane || !stillInColumn || !stillOurs) {
       // Terminal on purpose, and the one path where the reviewer has something
       // to say and no right to say it. Nothing has been posted, so there is
       // nothing to clean up; the review goes to the log and nowhere else.
@@ -210,15 +215,18 @@ export async function handleReview(
         issueKey: item.issueKey,
         inAgentLane,
         status: lane.status,
+        codeReviewer: lane.codeReviewerAccountId,
         outcome,
         findings: result.findings.length,
         summary: result.summary,
       });
       return {
         status: 'failed',
-        reason: inAgentLane
-          ? `ticket moved to ${lane.status} while reviewing`
-          : 'ticket moved to the human lane while reviewing',
+        reason: !inAgentLane
+          ? 'ticket moved to the human lane while reviewing'
+          : !stillInColumn
+            ? `ticket moved to ${lane.status} while reviewing`
+            : 'the ticket was taken off the bot while reviewing',
         retryable: false,
       };
     }
@@ -266,24 +274,33 @@ export async function handleReview(
     };
 
     // The transition last, so a failure anywhere above leaves the ticket in
-    // Reviewing and the redelivered item retries the whole thing rather than
-    // handing a half-reviewed pull request to the implementer.
+    // Code Review still held by the bot, and the redelivered item retries the
+    // whole thing rather than handing a half-reviewed pull request onwards.
     //
-    // Nothing here touches the attempt counter. countAttempts derives it from
-    // entries into changesRequested in Jira's own changelog, which works no
-    // matter who moved the card — so the transition below *is* the increment,
-    // and a reviewer that also wrote a counter would double it.
+    // Nothing here touches the attempt counter, and the reason is worth keeping
+    // straight now that the counter has moved: countAttempts counts In Progress
+    // → Code Review edges in Jira's own changelog. Sending work back is the
+    // opposite edge, so it increments nothing — the *implementer's* next
+    // transition does, whenever it happens, which is what makes the count
+    // survive no matter who moves the card.
     if (outcome === 'changes_requested') {
       await jira.applyMutation(item.issueKey, {
         comment: handbackComment(item, result.findings),
-        status: pipeline.statuses.changesRequested,
+        status: pipeline.statuses.inProgress,
+        codeReviewer: 'clear',
       });
       return { status: 'changes_requested', feedback };
     }
 
-    // Human gate 2. The reviewer never merges.
+    // Human gate 2, in the QA column where it belongs: the reviewer approved,
+    // and a human validates and merges. The reviewer never merges.
+    //
+    // Code Reviewer is released rather than left pointing at the bot, because
+    // at this gate that field means "the person holding the review" — which is
+    // what makes gate 2 legible on the board at all.
     await jira.applyMutation(item.issueKey, {
-      status: pipeline.statuses.awaitingMerge,
+      status: pipeline.statuses.validation,
+      codeReviewer: 'clear',
     });
     return { status: 'approved', feedback };
   } finally {

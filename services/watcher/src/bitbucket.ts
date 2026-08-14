@@ -306,10 +306,14 @@ export class BitbucketReader {
    * — it redirects to a three-dot diff, which is computed from the merge base
    * and therefore succeeds whether or not the merge would. The supported answer
    * is the conflicts endpoint, which redirects to `/file-conflicts/{spec}` and
-   * lists the conflicting paths: empty means mergeable, non-empty does not. It
-   * is only asked of OPEN PRs; for a merged or declined one the question is
-   * moot and reconcilePullRequest has already branched on state before it looks
-   * at `mergeable`.
+   * lists the conflicting paths: empty means mergeable, non-empty does not.
+   *
+   * It is only asked of OPEN PRs, and a merged or declined one is reported as
+   * `mergeable: true` without asking. That placeholder is safe because of what
+   * happens to those tickets: reconcilePullRequest branches on state and moves
+   * them to Done or Blocked, and the only way one reaches `decide()` with this
+   * value on its snapshot is if it is already sitting in a terminal column,
+   * where the first thing decide() does is idle it.
    */
   async getPullRequest(repo: RepositoryRef, id: number): Promise<PullRequestState | undefined> {
     const path = `/repositories/${repo.workspace}/${repo.slug}/pullrequests/${id}`;

@@ -47,33 +47,48 @@ const DEFAULT_MAX_STEPS = 12;
 /** Past this the model is thinking out loud, not asking. Also bounds the comment. */
 const MAX_QUESTIONS = 5;
 
+/** The fibonacci scale the board's Story Points field is pointed on. */
+const STORY_POINT_VALUES = [1, 2, 3, 5, 8, 13] as const;
+
 /**
- * `ask_human` — the refiner's one way of saying something that is not the story.
+ * Everything the refiner produces that is not the story, behind buffered tools.
+ *
+ * Three of them now: the open questions, the estimate, and the acceptance
+ * criteria. They land in three different places — a comment, a number field and
+ * a textarea field — and none of them belongs in the description, which is why
+ * none of them is prose the caller has to fish out of the model's output.
  *
  * Intent-shaped and buffered, for two separate reasons.
  *
  * Intent-shaped because that is what survives the move to MCP (HANDOFF decision
  * 8): a tool defined by the workflow keeps its name and its prompt when the body
- * is re-implemented on someone else's primitives, where `jira_add_comment` would
- * not. Buffered because nothing here may write. The lane guard runs after the
- * model finishes, and a tool that posted its comment mid-loop would have written
- * to a ticket that a human may have taken back — the one thing the guard exists
- * to prevent. So the questions accumulate in memory and the caller posts them,
- * once, after it has re-checked consent.
+ * is re-implemented on someone else's primitives, where `jira_update_issue`
+ * would not. Buffered because nothing here may write. The lane guard runs after
+ * the model finishes, and a tool that wrote mid-loop would have written to a
+ * ticket that a human may have taken back — the one thing the guard exists to
+ * prevent. So everything accumulates in memory and the caller writes it, once,
+ * after it has re-checked consent.
  *
- * A tool rather than a convention in the prose. Asking the model to emit its
- * questions behind a separator we split on would put a parser back on the path
- * decision 1 took one off, and it fails silently — a model that forgets the
- * separator publishes its questions into the spec.
+ * Tools rather than conventions in the prose. Asking the model to emit its
+ * questions behind a separator we split on, or to end with a `## Estimate`
+ * section we regex a number out of, puts a parser back on the path decision 1
+ * took one off — and it fails silently, in the direction of publishing the
+ * scaffolding into the spec.
  */
 export interface HandbackTools {
   tools: ToolSet;
   /** Questions asked during the run, in the order the model asked them. */
   questions: () => string[];
+  /** The size the model settled on, if it ever called `set_story_points`. */
+  storyPoints: () => number | undefined;
+  /** The criteria list, as markdown bullets, if the model wrote one. */
+  acceptanceCriteria: () => string | undefined;
 }
 
 export function createHandbackTools(log: Logger): HandbackTools {
   const asked: string[] = [];
+  let points: number | undefined;
+  let criteria: string[] = [];
 
   return {
     tools: {
@@ -103,8 +118,63 @@ export function createHandbackTools(log: Logger): HandbackTools {
           return `Recorded question ${asked.length} of at most ${MAX_QUESTIONS}. It will be posted when you finish. Continue; do not wait for an answer.`;
         },
       }),
+
+      // Not decoration, and not a summary: the board's workflow will not let a
+      // ticket leave To Do without a number in this field. Leaving the size in
+      // prose means a human hand-enters one at every single gate 1.
+      set_story_points: tool({
+        description:
+          "Set the ticket's Story Points, on the fibonacci scale, sizing the work for " +
+          "one implementer in one pass. The board requires this before the ticket can " +
+          "move to In Progress, so a story without it cannot be started. Anything you " +
+          "would put above 13 is not one story: give it 13 and use ask_human to propose " +
+          "the split. Call this exactly once; calling it again replaces the value.",
+        inputSchema: z.object({
+          points: z
+            .number()
+            .describe("One of 1, 2, 3, 5, 8, 13."),
+          why: z.string().min(1).describe("One sentence justifying the size."),
+        }),
+        execute: async ({ points: value, why }) => {
+          if (!STORY_POINT_VALUES.includes(value as (typeof STORY_POINT_VALUES)[number])) {
+            return `${value} is not on the scale. Use one of ${STORY_POINT_VALUES.join(", ")}.`;
+          }
+          points = value;
+          log.info("story points recorded", { points: value, why });
+          return `Story points set to ${value}. It will be written to the ticket when you finish.`;
+        },
+      }),
+
+      // Content, not state. The board has a field shaped like a list, so the
+      // criteria go in it rather than being buried in the middle of the prose —
+      // which makes gate 1 a concrete read for the human and hands the reviewer
+      // a checklist instead of a paragraph.
+      set_acceptance_criteria: tool({
+        description:
+          "Set the ticket's Acceptance Criteria: the specific, checkable conditions that " +
+          "make this story done. The implementer builds to these and the reviewer verifies " +
+          "against them, so each one must be something a person could confirm by looking at " +
+          "the finished change. Do not repeat them in the story. Call this exactly once; " +
+          "calling it again replaces the list.",
+        inputSchema: z.object({
+          criteria: z
+            .array(z.string().min(1))
+            .min(1)
+            .describe("One checkable condition per entry, in plain prose."),
+        }),
+        execute: async ({ criteria: list }) => {
+          const cleaned = list.map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+          if (cleaned.length === 0) return "Empty criteria ignored.";
+          criteria = cleaned;
+          log.info("acceptance criteria recorded", { count: cleaned.length });
+          return `Recorded ${cleaned.length} acceptance criteria. They will be written to the ticket when you finish.`;
+        },
+      }),
     },
     questions: () => [...asked],
+    storyPoints: () => points,
+    acceptanceCriteria: () =>
+      criteria.length === 0 ? undefined : criteria.map((entry) => `- ${entry}`).join("\n"),
   };
 }
 
@@ -134,7 +204,22 @@ as a requirement. So it holds the work and nothing else: no questions, no notes
 to the reviewer, no record of what you asked last time or what you were told.
 That conversation belongs in comments, and you have a tool for it.
 
+Three things you produce are NOT part of the story, because the board has its own
+field or its own place for each of them. Use the tool; do not write them into the
+description as well.
+
 - Something you need answered goes to \`ask_human\`, never into the story.
+- The acceptance criteria go to \`set_acceptance_criteria\`. They are the
+  checkable conditions for done, they live in the ticket's own Acceptance
+  Criteria field, and the reviewer works through them one at a time. The story
+  says what the work is and where it belongs; the criteria say how anyone can
+  tell it is finished.
+- The size goes to \`set_story_points\`. The board will not let this ticket be
+  started without it.
+
+Call \`set_acceptance_criteria\` and \`set_story_points\` on every ticket, before
+you write the story out. A story with no criteria is not refined, and a ticket
+with no points cannot leave the column it is in.
 
 The line to draw is **how** versus **what**. How to build it is yours: the
 framework, the file layout, the test runner, the port default. Pick one, say so,
@@ -175,13 +260,14 @@ is still open; anything you carry forward out of it into the body is a decision
 you are making again, not one the requester ever made. Never describe a scope
 you chose yourself as settled, and never cite the ticket as the authority for it.
 
-End the story with this section, exactly these two fields, and nothing else in
-it:
+End the story with this section, exactly this one field, and nothing else in it:
 
 ## Estimate
 
 Confidence: high | medium | low — one sentence of why.
-Story points: 1 | 2 | 3 | 5 | 8 | 13 — one sentence of why.
+
+The size does not go here. It goes to \`set_story_points\`, because the board has
+a field for it and a workflow rule that reads that field.
 
 Confidence is about the ticket, not about you: how sure you are that this story
 is what the requester actually wants. High means the draft and the repository
@@ -196,16 +282,16 @@ about the wrong thing, which is the only failure that matters here. Writing "the
 scope is unambiguous" about a scope you chose is the specific mistake to avoid,
 and so is inheriting that claim from a previous pass.
 
-Story points size the work for one implementer in one pass. Anything you would
-put above 13 is not a story: give it 13, say in one line what the natural split
-looks like, and use \`ask_human\` to propose it. Do not split it yourself and do
-not write a breakdown into the story — the story describes one piece of work,
-and deciding a ticket becomes three tickets is the human's call.
+Anything you would size above 13 is not a story: give it 13, and use
+\`ask_human\` to propose the split. Do not split it yourself and do not write a
+breakdown into the story — the story describes one piece of work, and deciding a
+ticket becomes three tickets is the human's call.
 
-A human reads both numbers at the review gate and decides what to do with them.
-Neither one blocks anything, so be honest rather than reassuring: low confidence
-on a genuinely underspecified ticket is the useful answer, and a confident story
-built on a guess is the expensive one.
+A human reads the confidence and the points side by side at the review gate and
+decides what to do with them. Confidence blocks nothing at all, so be honest
+rather than reassuring: low confidence on a genuinely underspecified ticket is
+the useful answer, and a confident story built on a guess is the expensive one.
+Never trade an honest low for a number that reads better.
 
 Scope discipline matters more than completeness. Refine the ticket in front of
 you; do not widen it into adjacent work you noticed.
@@ -234,6 +320,18 @@ export interface RefineResult {
   story: string;
   /** Open questions for the human, in the order asked. Posted as one comment. */
   questions: string[];
+  /**
+   * The size, for the board's Story Points field.
+   *
+   * Absent when the model never called `set_story_points`. Not an error: the
+   * story is still worth publishing, and the workflow's own validator will stop
+   * the ticket at gate 1 until a human puts a number in — which is exactly the
+   * fallback that existed before the refiner wrote this field at all. The
+   * hand-back comment says so rather than leaving it to be discovered.
+   */
+  storyPoints?: number;
+  /** The criteria list as markdown bullets, for the Acceptance Criteria field. */
+  acceptanceCriteria?: string;
   /** Repo-relative paths the model actually opened. */
   readPaths: string[];
   /** True when exploration hit the step budget rather than finishing on its own. */
@@ -264,6 +362,18 @@ export function draftPrompt(item: RefineWorkItem): string {
       : "Draft description as it stands on the board:",
     item.draftDescription.trim() || "(the draft is empty)",
   ];
+
+  const criteria = item.draftAcceptanceCriteria?.trim();
+  if (criteria) {
+    parts.push(
+      "",
+      "Acceptance Criteria field as it stands. Same contract as the description:",
+      "improve it, and re-send the whole list through set_acceptance_criteria —",
+      "what you send replaces what is there.",
+      "",
+      criteria,
+    );
+  }
 
   if (conversation.length > 0) {
     parts.push(
@@ -328,12 +438,16 @@ export async function refine(
   const exhaustedSteps = result.steps.length >= maxSteps;
 
   const questions = handback.questions();
+  const storyPoints = handback.storyPoints();
+  const acceptanceCriteria = handback.acceptanceCriteria();
 
   ctx.log.info("refinement complete", {
     steps: result.steps.length,
     maxSteps,
     readPaths: repo.readPaths().length,
     questions: questions.length,
+    storyPoints,
+    criteria: acceptanceCriteria !== undefined,
     finishReason: result.finishReason,
     usage: result.usage,
   });
@@ -353,5 +467,12 @@ export async function refine(
     );
   }
 
-  return { story, questions, readPaths: repo.readPaths(), exhaustedSteps };
+  return {
+    story,
+    questions,
+    ...(storyPoints === undefined ? {} : { storyPoints }),
+    ...(acceptanceCriteria === undefined ? {} : { acceptanceCriteria }),
+    readPaths: repo.readPaths(),
+    exhaustedSteps,
+  };
 }

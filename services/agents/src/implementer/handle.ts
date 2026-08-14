@@ -11,6 +11,11 @@
  * a human took back mid-run costs money and nothing else. The first externally
  * visible act is the push, and it happens after consent has been re-read.
  *
+ * Which column this run belongs in depends on why it was invoked, and that is
+ * not cosmetic: an attempt moves In Progress → Code Review and a rebase never
+ * leaves Code Review, which is exactly what makes the attempt budget able to
+ * tell them apart without a rule. See expectedColumn.
+ *
  * IMPLEMENTED: the `initial` and `rebase` reasons. `changes_requested` is still
  * a stub and is rejected up front rather than half handled — it needs the review
  * findings in front of the model, and it is where HANDOFF decision 5's
@@ -23,6 +28,7 @@ import {
   loadLlmConfig,
   loadPipelineConfig,
   type ImplementOutcome,
+  type ImplementReason,
   type ImplementWorkItem,
   type Logger,
   type PipelineConfig,
@@ -60,19 +66,63 @@ interface Clients {
 }
 
 /**
+ * Which column this run should still be sitting in.
+ *
+ * A rebase runs with the card parked in Code Review, because it is a branch
+ * refresh rather than a new implementation attempt and the ticket genuinely is
+ * still in code review while it happens. That is not cosmetic: it is what keeps
+ * the rebase off the attempt budget, which counts In Progress → Code Review
+ * edges and therefore cannot see anything that never left Code Review.
+ */
+function expectedColumn(pipeline: PipelineConfig, reason: ImplementReason): string {
+  return reason === 'rebase' ? pipeline.statuses.codeReview : pipeline.statuses.inProgress;
+}
+
+/**
+ * Re-read consent and ownership, immediately before writing.
+ *
+ * Three conditions, and the third is new. The label says the agents are still
+ * welcome; the column says the ticket has not moved on; and the Assignee says
+ * THIS run is the one in flight. That last one used to be carried by a status
+ * of its own — a ticket sitting in `Implementing` could only be a running
+ * agent. There is no such column now, so In Progress means "the implementer's
+ * turn" whether or not anyone is taking it, and the Assignee is what tells a
+ * live run from a ticket waiting for one.
+ */
+async function stillOurs(
+  clients: Clients,
+  item: ImplementWorkItem,
+): Promise<{ ours: true } | { ours: false; reason: string; status: string }> {
+  const { jira, pipeline } = clients;
+  const lane = await jira.readLaneState(item.issueKey);
+
+  if (!lane.labels.includes(pipeline.labels.agentLane)) {
+    return { ours: false, reason: 'ticket moved to the human lane', status: lane.status };
+  }
+  if (lane.status !== expectedColumn(pipeline, item.reason)) {
+    return { ours: false, reason: `ticket moved to ${lane.status}`, status: lane.status };
+  }
+  if (lane.assigneeAccountId !== pipeline.fields.botAccountId) {
+    return { ours: false, reason: 'the ticket was taken off the bot', status: lane.status };
+  }
+  return { ours: true };
+}
+
+/**
  * Put a dead end on the board — unless a human has already taken the ticket
  * back.
  *
  * Every failure that stops before the push goes through here, for two reasons.
  * The first is that it must be *said*: a handler that declines work and writes
- * nothing leaves the ticket in Implementing, which the state machine reads as
- * "an agent owns this" and idles on forever. That is what stranded KAN-6.
+ * nothing leaves the ticket assigned to the bot, which the state machine reads
+ * as "an agent owns this" and idles on forever. That is what stranded KAN-6,
+ * and the marker it strands on has changed while the failure mode has not.
  *
  * The second is the lane, re-read for the same reason the write paths re-read
  * it. The work item is minutes old by the time anything fails, and a ticket a
- * human has pulled back into their own lane must not be dragged into Agent
- * Failed underneath them. Nothing has been written when this is called, so
- * standing down costs a log line and nothing else.
+ * human has pulled back into their own lane must not be dragged into Blocked
+ * underneath them. Nothing has been written when this is called, so standing
+ * down costs a log line and nothing else.
  */
 async function failOnBoard(
   clients: Clients,
@@ -81,29 +131,28 @@ async function failOnBoard(
 ): Promise<ImplementOutcome> {
   const { jira, pipeline, log } = clients;
 
-  const lane = await jira.readLaneState(item.issueKey);
-  const inAgentLane = lane.labels.includes(pipeline.labels.agentLane);
-  const stillImplementing = lane.status === pipeline.statuses.implementing;
-
-  if (!inAgentLane || !stillImplementing) {
+  const ownership = await stillOurs(clients, item);
+  if (!ownership.ours) {
     log.warn('stood down before reporting a failure; the ticket is no longer ours', {
       issueKey: item.issueKey,
-      inAgentLane,
-      status: lane.status,
+      status: ownership.status,
+      standDown: ownership.reason,
       unreported: args.reason,
     });
     return {
       status: 'failed',
-      reason: inAgentLane
-        ? `ticket moved to ${lane.status} while implementing`
-        : 'ticket moved to the human lane while implementing',
+      reason: `${ownership.reason} while implementing`,
       retryable: false,
     };
   }
 
   await jira.applyMutation(item.issueKey, {
     comment: args.comment,
-    status: pipeline.statuses.failed,
+    status: pipeline.statuses.blocked,
+    // Released with the same call that parks it. A ticket in Blocked still
+    // assigned to the bot reads as an agent that is somehow working on a ticket
+    // it already gave up on.
+    assignee: 'clear',
   });
   return { status: 'failed', reason: args.reason, retryable: false };
 }
@@ -171,10 +220,11 @@ export async function handleImplement(
 ): Promise<ImplementOutcome> {
   const { item, log } = ctx;
 
+  const pipeline = loadPipelineConfig();
   const clients: Clients = {
     bitbucket: new BitbucketClient(loadBitbucketConfig('implementer'), log),
-    jira: new JiraWriter(loadJiraConfig(), log),
-    pipeline: loadPipelineConfig(),
+    jira: new JiraWriter(loadJiraConfig(), pipeline, log),
+    pipeline,
     model: createAgentModel(loadLlmConfig(), log),
     log,
   };
@@ -259,44 +309,38 @@ async function implementInitial(
 
     // The lane guard. Consent is re-read here rather than trusted from dispatch,
     // because the work item is many minutes old by now and a human can have
-    // taken the ticket back while the model was working. Both conditions matter:
-    // the label says the agents are still welcome, the column says this run is
-    // still the one in flight.
-    const lane = await jira.readLaneState(item.issueKey);
-    const inAgentLane = lane.labels.includes(pipeline.labels.agentLane);
-    const stillImplementing = lane.status === pipeline.statuses.implementing;
-
-    if (!inAgentLane || !stillImplementing) {
+    // taken the ticket back while the model was working.
+    const ownership = await stillOurs(clients, item);
+    if (!ownership.ours) {
       // Terminal on purpose, and it is the one path where the implementer has
       // something to say and no right to say it. Nothing was pushed, so there is
       // nothing to clean up; the work goes to the log and nowhere else.
       log.warn('stood down, ticket is no longer ours', {
         issueKey: item.issueKey,
-        inAgentLane,
-        status: lane.status,
+        status: ownership.status,
+        standDown: ownership.reason,
         changedPaths: result.changedPaths,
         summary: result.summary,
       });
       return {
         status: 'failed',
-        reason: inAgentLane
-          ? `ticket moved to ${lane.status} while implementing`
-          : 'ticket moved to the human lane while implementing',
+        reason: `${ownership.reason} while implementing`,
         retryable: false,
       };
     }
 
     if (stopHere !== undefined) {
-      // Agent Failed rather than a silent idle: the board should show that this
+      // Blocked rather than a silent idle: the board should show that this
       // ticket needs a person. Note the workflow has to permit the transition
-      // from Implementing — resolveStatusIds only checks that the status exists.
+      // from In Progress — resolveStatusIds only checks that the status exists.
       await jira.applyMutation(item.issueKey, {
         comment: failureComment({
           reason: stopHere,
           summary: result.summary,
           verification: result.verification,
         }),
-        status: pipeline.statuses.failed,
+        status: pipeline.statuses.blocked,
+        assignee: 'clear',
       });
       return { status: 'failed', reason: stopHere, retryable: false };
     }
@@ -338,8 +382,12 @@ async function implementInitial(
     // dispatch_review bails out of.
     await jira.linkPullRequest(item.issueKey, pr);
 
+    // In Progress → Code Review. This edge IS the attempt: countAttempts reads
+    // it out of the changelog, so nothing here writes a counter and nothing
+    // should — a run that also incremented something would double it.
     await jira.applyMutation(item.issueKey, {
       status: pipeline.statuses.codeReview,
+      assignee: 'clear',
     });
 
     return {
@@ -524,22 +572,20 @@ async function implementRebase(
     // The lane guard, in the same place and for the same reason as the initial
     // path: the work item is many minutes old and a human may have taken the
     // ticket back. Everything above this line is local to the workspace.
-    const lane = await jira.readLaneState(item.issueKey);
-    const inAgentLane = lane.labels.includes(pipeline.labels.agentLane);
-    const stillImplementing = lane.status === pipeline.statuses.implementing;
-
-    if (!inAgentLane || !stillImplementing) {
+    //
+    // The column it checks for is Code Review, not In Progress — see
+    // expectedColumn. A rebase runs with the card where it already was.
+    const ownership = await stillOurs(clients, item);
+    if (!ownership.ours) {
       log.warn('stood down, ticket is no longer ours', {
         issueKey: item.issueKey,
-        inAgentLane,
-        status: lane.status,
+        status: ownership.status,
+        standDown: ownership.reason,
         rebased,
       });
       return {
         status: 'failed',
-        reason: inAgentLane
-          ? `ticket moved to ${lane.status} while rebasing`
-          : 'ticket moved to the human lane while rebasing',
+        reason: `${ownership.reason} while rebasing`,
         retryable: false,
       };
     }
@@ -556,7 +602,8 @@ async function implementRebase(
     if (verification.attempted && verification.passed === false) {
       await jira.applyMutation(item.issueKey, {
         comment: rebaseComment({ baseBranch, rebased, rounds, verification }),
-        status: pipeline.statuses.failed,
+        status: pipeline.statuses.blocked,
+        assignee: 'clear',
       });
       return {
         status: 'failed',
@@ -565,13 +612,14 @@ async function implementRebase(
       };
     }
 
-    // Back to the reviewer rather than to wherever the ticket was when the
-    // conflict was noticed. The commits have been rewritten onto a base that
-    // moved, so what a reviewer approved before this is not what would merge
-    // now — and re-reviewing costs nothing from the attempt budget.
+    // No transition: the ticket never left Code Review, which is both where it
+    // belongs — the commits have been rewritten onto a base that moved, so what
+    // a reviewer approved before this is not what would merge now — and what
+    // keeps the rebase off the attempt budget. Releasing the Assignee is the
+    // whole of the hand-back, and the next tick dispatches the reviewer.
     await jira.applyMutation(item.issueKey, {
       comment: rebaseComment({ baseBranch, rebased, rounds, verification }),
-      status: pipeline.statuses.codeReview,
+      assignee: 'clear',
     });
 
     const summary = rounds

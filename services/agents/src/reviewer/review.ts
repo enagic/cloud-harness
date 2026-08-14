@@ -338,6 +338,12 @@ export function reviewPrompt(
       ? `${args.diff.slice(0, MAX_DIFF_CHARS)}\n\n…the diff is truncated here at ${MAX_DIFF_CHARS} characters. Read the remaining files directly.`
       : args.diff || '(the pull request has an empty diff)';
 
+  // The criteria are a checklist rather than a paragraph, which is the point of
+  // the board carrying them in their own field: a review that works through
+  // them one at a time is a different and better review than one that reads a
+  // story and forms an impression.
+  const criteria = item.acceptanceCriteria?.trim();
+
   return [
     `Ticket: ${item.issueKey}`,
     `Title: ${item.title}`,
@@ -350,6 +356,16 @@ export function reviewPrompt(
     '',
     item.refinedDescription.trim() || '(the story is empty)',
     '',
+    ...(criteria
+      ? [
+          'The acceptance criteria a human approved. Check each one against the change',
+          'and raise a finding for any that is not met — an unmet criterion is a blocker,',
+          'not a nitpick, however good the code around it is:',
+          '',
+          criteria,
+          '',
+        ]
+      : []),
     'Where a finding can be anchored. A line outside these cannot be commented on:',
     '',
     describeDiff(args.files),

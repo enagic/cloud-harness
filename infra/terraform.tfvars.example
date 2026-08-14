@@ -11,28 +11,41 @@ jira_base_url    = "https://your-org.atlassian.net"
 jira_project_key = "ENG"
 jira_user_email  = "automation@your-org.com"
 
-# The statuses below MUST already exist on the board, with transitions between
+# The dedicated bot account, and the in-flight marker. A ticket assigned to it
+# is being worked on by an agent right now. The account needs `Assignable User`
+# in the project's permission scheme, which is a SEPARATE permission from write
+# access — without it the bot edits and transitions fine while silently failing
+# to be assigned. `npm run preflight` checks.
+jira_bot_account_id = "5b10a2844c20165700ede21g"
+
+# The four fields the columns cannot carry. Ids, not names — read them off
+# /rest/api/3/field. A rename must not break history counting, which is why the
+# attempt budget is keyed on the id.
+jira_fields = {
+  code_reviewer       = "customfield_10101" # userpicker
+  dor                 = "customfield_10102" # multicheckbox, ticked = gate 1 passed
+  story_points        = "customfield_10016" # number, written by the refiner
+  acceptance_criteria = "customfield_10103" # textarea, written by the refiner
+  # dor_ticked_value  = "Yes"
+}
+
+# The columns below MUST already exist on the board, with transitions between
 # them permitted for the automation account. Jira resolves transitions by name,
-# so a status that is missing or spelled differently is a ticket that silently
-# never moves. Defaults shown — override to match an existing workflow.
+# so a column that is missing or spelled differently is a ticket that silently
+# never moves. Defaults shown — override to match an existing board.
+#
+# These are ordinary columns rather than pipeline-specific ones, deliberately:
+# most teams cannot add columns to their own board.
 #
 # jira_statuses = {
-#   refining           = "Refining"
-#   refinement_review  = "Refinement Review"
-#   ready_to_implement = "Ready for Implementation"
-#   implementing       = "Implementing"
-#   code_review        = "Code Review"
-#   reviewing          = "Reviewing"
-#   changes_requested  = "Changes Requested"
-#   rebase_required    = "Rebase Required"
-#   awaiting_merge     = "Awaiting Merge"
-#   done               = "Done"
-#   failed             = "Agent Failed"
+#   to_do       = "To Do"       # drafting, refinement, human gate 1
+#   in_progress = "In Progress" # the implementer's column
+#   code_review = "Code Review" # review, rebase, consented fix
+#   validation  = "Validation"  # human gate 2 — QA, then the merge
+#   done        = "Done"
+#   blocked     = "Blocked"
+#   closed      = "Closed"      # recognised, never read or written
 # }
-#
-# Columns a ticket is drafted in. A labelled ticket in one of these is the
-# kickoff signal, and a story sent back from refinement review returns here.
-# jira_draft_statuses = ["Backlog", "To Do"]
 #
 # The lane marker, and the only label the pipeline reads. Present means the
 # agents own the ticket, absent means a human does. It is standing consent, not
@@ -41,10 +54,11 @@ jira_user_email  = "automation@your-org.com"
 # first — editing it in the agent lane is a broken contract and the agent wins.
 # jira_agent_label = "agent"
 
-# Implementation attempts before a ticket is failed for human triage, counted as
-# transitions into the changes_requested status since the last transition into
-# ready_to_implement. Rebases move through a different status and so cannot
-# consume budget. Re-approving a ticket at human gate 1 grants a fresh budget.
+# Implementation attempts before a ticket is blocked for human triage, counted
+# as In Progress -> Code Review transitions since the last DOR tick. A rebase
+# never leaves Code Review and so cannot produce that edge, which is what
+# exempts it — structurally, with no rule to get wrong. Ticking DOR again grants
+# a fresh budget, and Jira records who did it.
 # max_implementation_attempts = 3
 
 # --- Bitbucket --------------------------------------------------------------

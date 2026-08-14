@@ -37,20 +37,24 @@ locals {
   # The workflow contract. Every component needs the same view of it, or the
   # watcher will transition tickets into statuses the agents never look for.
   pipeline_env = [
-    { name = "STATUS_REFINING", value = var.jira_statuses.refining },
-    { name = "STATUS_REFINEMENT_REVIEW", value = var.jira_statuses.refinement_review },
-    { name = "STATUS_READY_TO_IMPLEMENT", value = var.jira_statuses.ready_to_implement },
-    { name = "STATUS_IMPLEMENTING", value = var.jira_statuses.implementing },
+    { name = "STATUS_TO_DO", value = var.jira_statuses.to_do },
+    { name = "STATUS_IN_PROGRESS", value = var.jira_statuses.in_progress },
     { name = "STATUS_CODE_REVIEW", value = var.jira_statuses.code_review },
-    { name = "STATUS_REVIEWING", value = var.jira_statuses.reviewing },
-    { name = "STATUS_CHANGES_REQUESTED", value = var.jira_statuses.changes_requested },
-    { name = "STATUS_REBASE_REQUIRED", value = var.jira_statuses.rebase_required },
-    { name = "STATUS_AWAITING_MERGE", value = var.jira_statuses.awaiting_merge },
+    { name = "STATUS_VALIDATION", value = var.jira_statuses.validation },
     { name = "STATUS_DONE", value = var.jira_statuses.done },
-    { name = "STATUS_FAILED", value = var.jira_statuses.failed },
+    { name = "STATUS_BLOCKED", value = var.jira_statuses.blocked },
+    { name = "STATUS_CLOSED", value = var.jira_statuses.closed },
 
-    { name = "STATUS_DRAFT", value = join(",", var.jira_draft_statuses) },
     { name = "LABEL_AGENT", value = var.jira_agent_label },
+
+    # The other half of the state. Seven generic columns cannot carry eleven
+    # states on their own; these are what the rest of it lives on.
+    { name = "JIRA_BOT_ACCOUNT_ID", value = var.jira_bot_account_id },
+    { name = "FIELD_CODE_REVIEWER", value = var.jira_fields.code_reviewer },
+    { name = "FIELD_DOR", value = var.jira_fields.dor },
+    { name = "FIELD_DOR_TICKED_VALUE", value = var.jira_fields.dor_ticked_value },
+    { name = "FIELD_STORY_POINTS", value = var.jira_fields.story_points },
+    { name = "FIELD_ACCEPTANCE_CRITERIA", value = var.jira_fields.acceptance_criteria },
 
     { name = "MAX_IMPLEMENTATION_ATTEMPTS", value = tostring(var.max_implementation_attempts) },
   ]

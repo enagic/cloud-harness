@@ -1,18 +1,31 @@
-# Handoff — 2026-08-13
+# Handoff — 2026-08-14
 
-**All three agents are now built, and the third one has reviewed a real pull
-request.** KAN-6 went To Do → Refining → Refinement Review → Ready for
-Implementation → Implementing → Code Review, there is a real pull request on
-`kwon-cloud/sandbox` with four files in it that the repo's own `npm test`
-passes, and the reviewer has read that pull request, run its suite and reached
-`approved` — against live Bitbucket, live Jira and a live model. What it has
-**not** done yet is write: the run below was stopped deliberately before the
-first comment. See "Where the reviewer is".
+**Decision 11 is built.** The eleven-status state machine is gone, replaced by
+seven board columns plus Assignee, Code Reviewer, DOR, Story Points and
+Acceptance Criteria. Every surface moved with it — the watcher, all three
+agents, Terraform, the README and ARCHITECTURE. 245 tests pass, 42 of them on
+`pipeline.ts` itself. **Nothing has been run against a live board**, because the
+board does not have the columns or the fields yet and the bot account does not
+exist. See "What decision 11 actually landed" and the three probes at the end of
+decision 11, which are now the shortest path to a working pipeline again.
+
+**All three agents are built, and the third one has reviewed a real pull
+request.** KAN-6 went through the whole pipeline under the *old* status names,
+there is a real pull request on `kwon-cloud/sandbox` with four files in it that
+the repo's own `npm test` passes, and the reviewer has read that pull request,
+run its suite and reached `approved` — against live Bitbucket, live Jira and a
+live model. What it has **not** done yet is write: the run was stopped
+deliberately before the first comment. See "Where the reviewer is".
+
+> **The live-run history in this document predates decision 11 and the column
+> names in it are stale.** What those runs proved about the *mechanisms* — the
+> clone, the tool loop, the ADF round trip, the push, the PR — all stands, and
+> none of it touched the status vocabulary. Read the column names as history.
 
 The sandbox repo is no longer empty, which retires the biggest caveat this
 document used to carry — see "The repo now has code in it".
 
-Reconciled against the tree on 2026-08-13: working tree clean, 201 tests
+Reconciled against the tree on 2026-08-14: working tree clean, 245 tests
 passing.
 
 **Decision 9's anchoring rule was wrong about the mechanism and is corrected in
@@ -32,16 +45,11 @@ PR-comment read path that has since been built. Decision 9 **reverses** the
 direction an earlier session was leaning — that reasoning is preserved in the
 decision so it is not re-derived.
 
-**Decision 11 was added 2026-08-14 and is the largest pending change to the state
-machine.** Production has seven board columns against `PipelineStatuses`' eleven,
-and no admin rights to add more, so status stops being the whole state and splits
-across the column, Assignee, Code Reviewer, DOR and Story Points. Nothing is
-implemented. Both team questions it was blocked on came back the same day and
-both **shrank** the design: Validation is post-build QA with required-field
-validators in front of it, which pushed gate 1 into To Do and let the board
-enforce it; and a dedicated bot Atlassian account settles the in-flight marker.
-What remains is three probes, not decisions. Read it before touching
-`pipeline.ts`; it subtracts more than it adds.
+**Decision 11 is implemented as designed, with three additions the build turned
+up.** They are in "What decision 11 actually landed", and the ordering one is
+worth knowing before reading anything else: **the comment now has to be written
+before the in-flight marker is released**, because with gate 1 and the draft
+state sharing a column, the comment thread *is* part of the state.
 
 ## READ FIRST
 
@@ -176,6 +184,104 @@ is now in the tree, verified against real Bitbucket, and the ref can be deleted.
 A previous session claimed a relabelling was outstanding when the user had
 already done it. Query Jira — the dry run at the bottom prints the live board.
 
+## What decision 11 actually landed
+
+Everything the decision specified, plus three things the build turned up. The
+decision itself is unchanged and still worth reading for *why*; this section is
+*what*, and where the reasoning had to be extended.
+
+### The shape, in one table
+
+| Was | Is now |
+|---|---|
+| `PipelineStatuses`, eleven fields | Seven: `toDo` `inProgress` `codeReview` `validation` `done` `blocked` `closed` |
+| `draftStatuses` allowlist | Gone. `toDo` is the one drafting column |
+| `Refining` / `Implementing` / `Reviewing` | `PipelineFields.botAccountId` on Assignee, or on Code Reviewer for the reviewer |
+| `Refinement Review` | To Do, DOR unset, pipeline's comment newest |
+| `Ready for Implementation` | DOR ticked. The tick is gate 1 *and* the budget reset |
+| `Changes Requested` / `Rebase Required` | `implementReasonFor(ticket)`, derived from Bitbucket |
+| `Awaiting Merge` | `validation` |
+| `Agent Failed` | `blocked` |
+| `countAttempts(transitions, ids)` | `countAttempts(history, ids)` over In Progress → Code Review edges since the last DOR grant |
+| `getStatusHistory` → `StatusTransition[]` | `getIssueHistory` → `{transitions, dorGrantedAt}` |
+| `needsHistory(status, config)` | `needsHistory(ticket, config)` — it now needs the PR |
+| JQL: `status IN (…) OR labels = agent` | `labels = "agent"` alone |
+
+New config, all required: `JIRA_BOT_ACCOUNT_ID`, `FIELD_CODE_REVIEWER`,
+`FIELD_DOR`, `FIELD_STORY_POINTS`, `FIELD_ACCEPTANCE_CRITERIA`, plus an optional
+`FIELD_DOR_TICKED_VALUE` defaulting to `Yes`. Terraform grew `jira_bot_account_id`
+and a `jira_fields` object and lost `jira_draft_statuses`.
+
+### The three things the decision did not anticipate
+
+**1. The comment must be written BEFORE the in-flight marker is released, and
+`applyMutation` was reordered in both clients to guarantee it.** This is the one
+to carry forward. The decision made the comment thread part of the state — no
+pipeline comment means "never refined" — and it made Assignee the in-flight
+marker. Release the Assignee first and there is a window, one HTTP call wide,
+where the ticket reads as an unrefined draft nobody is holding. The watcher ticks
+on a timer and will eventually land in it, and what it does there is refine a
+ticket that is already refined, forever. So the order in both clients is now
+**comment → fields and labels → status**, and a test pins it.
+
+**2. The refiner now comments on every pass, not only when it has questions.**
+Same cause. A silent successful pass leaves no pipeline comment, so the next tick
+reads the ticket as never refined. The comment says what it did, names anything
+it could not settle, and — new — says out loud when Story Points came back empty,
+because that is the one thing that will stop the ticket dead at the workflow
+validator.
+
+**3. Story Points and Acceptance Criteria are buffered tools, not prose the
+caller parses.** The decision said the refiner should write both fields but not
+how. Parsing a number out of `## Estimate` would have put a parser back on the
+path decision 1 took one off, and it fails toward publishing the scaffolding into
+the spec. So `set_story_points` and `set_acceptance_criteria` join `ask_human` as
+buffered, intent-shaped tools (decision 8) — nothing writes until after the lane
+guard. `## Estimate` keeps Confidence and loses Story points, since only one of
+the two has a field to live in.
+
+Neither field is mandatory to produce. An unsized story still publishes: the
+workflow validator stops it at gate 1 until a human enters a number, which is
+exactly the fallback that existed before, and a wrong number in a gated field is
+worse than an empty one.
+
+### Smaller consequences worth knowing
+
+- **`acceptanceCriteria` is back on `ImplementWorkItem` and `ReviewWorkItem`**,
+  after being deleted under decision 1. That is not a reversal: it was deleted
+  as a `string[]` parsed out of a structured story, and it is back as a board
+  field's contents travelling verbatim as text. The reviewer's prompt now says
+  an unmet criterion is a blocker.
+- **The lane guard grew a third condition in all three agents.** Label, column,
+  *and* the marker. Without the third, a ticket that went round the loop and came
+  back to the same column looks identical to the one the run was dispatched
+  against — which the old bookkeeping statuses made impossible by accident.
+- **`reconcilePullRequest` shrank to merges and declines.** Conflict state rides
+  on the snapshot as `pullRequestMergeable` and `decide()` reads it, which is
+  what lets a rebase happen without the ticket leaving Code Review. The watcher
+  also stopped fetching the same pull request twice per tick.
+- **`verifyFields()` runs at startup**, next to `resolveStatusIds()`. A mistyped
+  custom field id is not an error to Jira — the field is simply absent from every
+  response, so DOR reads as never ticked and every ticket waits at a gate a human
+  has already passed. Preflight checks it too, along with whether the bot account
+  is actually assignable.
+- **The attempt budget floor**: `dispatch_review` reports
+  `Math.max(attempts, 1)`. The number is only ever displayed, and "0 of 3" on a
+  pull request that plainly exists reads as a bug.
+
+### What has NOT been done
+
+- **No live run of any kind.** The board needs its seven columns, its four
+  fields and the bot account before anything can be pointed at it. `.env.local`
+  and `infra/terraform.tfvars` both carry `REPLACE_ME`-style placeholders and
+  will fail loudly at startup, deliberately.
+- **The three probes at the end of decision 11 are still unrun**, and two of them
+  are now load-bearing rather than advisory — the DOR changelog shape decides
+  whether the budget resets at all.
+- **`changes_requested` is still rejected by the implementer.** It is now the
+  *derived* reason for any In Progress ticket that has a pull request, so it is
+  reached more readily than before, but it fails onto the board the same way.
+
 ## Where the refiner actually is
 
 Six steps. All six ran against KAN-6:
@@ -186,7 +292,7 @@ Six steps. All six ran against KAN-6:
 | 2 | Read the repo, write the story | Done — AI SDK tool loop, `refine.ts` |
 | 3 | Re-check the ticket is still ours | Done — the lane guard |
 | 4 | Write the story into the description | Done — `publishRefinement` |
-| 5 | Move the card to `Refinement Review` | Done — `applyMutation` |
+| 5 | Hand back at gate 1 | Done — `applyMutation`; a comment and a released Assignee since decision 11, a column move before it |
 | 6 | Report the outcome | Done for the happy path |
 
 ### What the live run proved
@@ -330,7 +436,7 @@ test that pinned the old behaviour now pins the new one and names KAN-8.
 ### Two decisions in the implementer worth knowing before changing it
 
 **A failing suite is not pushed.** No branch, no PR; the ticket goes to
-`Agent Failed` with the failing command and output in a comment. The review
+`Blocked` with the failing command and output in a comment. The review
 budget is three round trips and it exists for disagreements about a change, not
 for code that does not run — the reviewer would execute the same command, reach
 the same conclusion, and spend an attempt saying so. The cost is that the run's
@@ -357,7 +463,7 @@ written. Six steps; five of them ran live.
 | 3 | Read the change, run the suite, record findings | Done — AI SDK tool loop, `review.ts` |
 | 4 | Re-check the ticket is still ours | Done — the lane guard |
 | 5 | Post one comment per finding, plus the summary | **Written, never run** |
-| 6 | Approve and move to `Awaiting Merge`, or send back | **Written, never run** |
+| 6 | Approve and move to `Validation`, or send back to In Progress | **Written, never run** |
 
 ### What the no-write live run proved
 
@@ -480,7 +586,8 @@ Two bugs the tests caught, both of which would have been silent in production:
   empty arrays.
 - **Two lanes, one label** (decision 2, rewritten below). `LABEL_REFINE` and
   `LABEL_CHANGES_REQUESTED` replaced by a single `LABEL_AGENT` (`agent`), plus a
-  new `STATUS_DRAFT` allowlist. Verified against live Jira.
+  `STATUS_DRAFT` allowlist. Verified against live Jira. The label survives;
+  the allowlist did not — decision 11 collapsed it into the one `toDo` column.
 - **Agents move their own cards.** The "watcher owns all status mutations" half
   of decision 2 was struck — see the note there before rebuilding it.
 - **The agent-side Jira write path**, mirroring the watcher's verified client:
@@ -524,6 +631,19 @@ Two bugs the tests caught, both of which would have been silent in production:
 - **Retry-and-degrade on a rejected inline comment.** There is no rejection —
   see READ FIRST item 0. The anchor is validated against the diff before the
   write, in `reviewer/diff.ts`. Do not add a catch that will never fire.
+- **A status for "an agent is working on this."** Decision 11 deleted the three
+  that existed. In-flight is the Assignee, or Code Reviewer for the reviewer,
+  and the board's own fields are what a person already reads to answer that
+  question. A new column would need admin rights nobody has, and a label would
+  be machine bookkeeping on a human's board.
+- **A label-based attempt counter.** Decision 7 proposed it; decision 11 removed
+  the reason. The count is the In Progress → Code Review edge in the changelog,
+  and the exemptions are positional. Building the label version now would give
+  the pipeline two counters to keep honest.
+- **Parsing Story Points or acceptance criteria out of the refiner's prose.**
+  They are buffered tools, for the same reason `ask_human` is one — a separator
+  or a heading a regex reaches into is a parser, and it fails toward publishing
+  the scaffolding into the spec. See "What decision 11 actually landed".
 
 ## Decisions made this session
 
@@ -580,17 +700,19 @@ Three consequences, all handled:
 
 - **The "checked last" defence inverted, as predicted.** Kickoff used to run
   last so a lingering label could not pull a ticket backwards; under a
-  persistent label that lingering state is normal. Kickoff now tests *label
-  present **and** ticket in a draft column* — hence the new `draftStatuses`
-  allowlist (`STATUS_DRAFT`, default `Backlog,To Do`). Without it, any column
-  this state machine does not recognise would re-refine on every tick.
+  persistent label that lingering state is normal. Kickoff therefore tests
+  *label present **and** the right column* — originally a `draftStatuses`
+  allowlist, now the single `toDo` column plus DOR unset plus no pipeline
+  comment (decision 11). Without that second half, any column this state machine
+  does not recognise would re-refine on every tick.
 - **Gate 1 lost its label and gained a column.** Sending a story back was the
-  changes-requested label; it is now moving the card to a draft column, which
-  falls through to kickoff. One label cannot carry both the lane and the
-  verdict, and the board already distinguishes them. `getHumanComments` now
-  keys on *draft column + agent lane* rather than on the old label, which
-  covers a first pass and a send-back identically — a first pass just finds no
-  comments.
+  changes-requested label; it became a column move, which fell through to
+  kickoff. One label cannot carry both the lane and the verdict, and the board
+  distinguishes them. **Decision 11 moved this one step further:** with gate 1
+  and the draft in the same column there is no move left to make, so the
+  send-back is a comment, and the thread tells the three To Do states apart.
+  `getConversation` now keys on *To Do + DOR unset*, which covers a first pass
+  and a send-back identically — a first pass just finds no comments.
 - **Mid-flight removal still collides**, and `decide()` cannot fix it: removing
   the label stops the *next* dispatch but the running agent is already gone. It
   stands down at its own **write guard**, re-reading the lane and column
@@ -811,10 +933,11 @@ there is no runaway to stop, and a person who keeps sending a ticket back is
 exercising the same override decision 7 already grants them.
 
 This is already true by construction and should stay that way. `needsHistory`
-([`pipeline.ts:161`](../packages/shared/src/pipeline.ts)) is true only for
-`Changes Requested`, `Code Review` and `Rebase Required`, so `attempts` is never
-populated on a refine tick, and `RefineWorkItem` carries no `attempt` or
-`maxAttempts` at all — unlike both other work items. Do not add them.
+([`pipeline.ts`](../packages/shared/src/pipeline.ts)) is never true for a ticket
+in the refine state — under decision 11 it covers Code Review, Validation, and
+In Progress tickets that have a pull request — so `attempts` is never populated
+on a refine tick, and `RefineWorkItem` carries no `attempt` or `maxAttempts` at
+all, unlike both other work items. Do not add them.
 
 ### 5. Agents may review anyone's code; they may only write with consent
 
@@ -890,7 +1013,19 @@ worked end to end was speed in the wrong direction. Two of the three now run
 live, so that argument has weakened — but the reviewer still has never run, and
 it is what closes the loop. The ordering conclusion is unchanged.
 
-### 7. The attempt counter moves to labels
+### 7. The attempt counter moves to labels — NOT BUILT, and superseded
+
+> **Decision 11 built the changelog basis instead, and removed the reason this
+> decision existed.** Its argument was that the counter had to decouple from
+> status transitions because a consented fix must not consume an attempt.
+> Counting the *edge* — In Progress → Code Review — handles that structurally:
+> a consented fix parks in Code Review and produces no edge, exactly as a rebase
+> does. No new storage, no second counter to keep honest, and the audit trail is
+> still Jira's own.
+>
+> The principle below still holds and is why the counter is arithmetic rather
+> than a model's opinion. Everything about *labels* is superseded. Do not build
+> it; there would then be two counters.
 
 **The model must not be the thing that counts it.** A loop-breaker that depends
 on a stochastic component fails in the one direction that matters: when it is
@@ -910,8 +1045,10 @@ and nothing else's. Do not swap the label on a refine dispatch: a human moves
 the card back into a draft column before every refine pass, so there is no
 machine-to-machine cycle to break, and a counter there would only cap how many
 times a person may ask for another pass. The counter must stay off the refine
-path the way it is today — `needsHistory` excludes the draft columns and
-`RefineWorkItem` has no attempt fields. See decision 4.
+path the way it is today — `needsHistory` never fires for a refine tick and
+`RefineWorkItem` has no attempt fields. See decision 4. (Under decision 11 the
+send-back is a comment rather than a column move, which does not change the
+argument: a person still acts between every pass.)
 
 This also decouples the counter from status transitions, which is now
 *necessary*: a consented fix (decision 5) must **not** consume an attempt. The
@@ -938,7 +1075,7 @@ agent-side access in tools now creates the seam that makes the migration cheap.
 
 **The watcher is explicitly excluded.** MCP exposes tools to a model and the
 watcher is not one — `decide()` is arithmetic over statuses and labels. There is
-also a concrete risk: `getStatusHistory` ([`jira.ts:237`](../services/watcher/src/jira.ts))
+also a concrete risk: `getIssueHistory` ([`jira.ts`](../services/watcher/src/jira.ts))
 returns changelog entries with **status IDs**, and the comment above it explains
 why that precision is load-bearing. That is exactly the kind of unglamorous
 exact shape a model-facing tool surface does not preserve. The watcher's Jira
@@ -1144,9 +1281,16 @@ the oldest exchanges are the settled ones.
 This is also what the refiner already does. `conversation` arrives *on the work
 item*; it is not fetched.
 
-### 11. Seven columns, four fields — the production board mapping
+### 11. Seven columns, four fields — the production board mapping — IMPLEMENTED
 
-**Not implemented. Designed against the real production board, 2026-08-14.**
+> Designed against the real production board and built the same day,
+> 2026-08-14. What follows is the design as it was decided; three places where
+> the build had to extend it are in "What decision 11 actually landed" near the
+> top, and the most important of them — comment before marker — is not derivable
+> from anything below.
+>
+> Still unrun against a live board. The probes at the end of this decision are
+> the gate on that, and two of them are now load-bearing.
 
 `PipelineStatuses` has eleven statuses plus a draft allowlist. Production has
 seven columns and no admin rights to add more:
@@ -1280,12 +1424,13 @@ The gate-2 rebase arrives from Validation → Code Review, so it is excluded by 
 same edge rule. Still structural, still no conditional for a future change to
 break.
 
-`getStatusHistory`
-([`jira.ts:248`](../services/watcher/src/jira.ts)) already pages the entire
-changelog and discards everything where `field !== 'status'`. Widen that filter;
-the paging is unchanged. Resolve DOR by `fieldId`, not by field name, for the
-same reason `resolveStatusIds` resolves statuses by ID — a rename must not
-silently break history counting.
+`getStatusHistory` already paged the entire changelog and discarded everything
+where `field !== 'status'`. **Done:** the filter widened, the paging did not
+change, and the method is now `getIssueHistory`
+([`jira.ts`](../services/watcher/src/jira.ts)) returning
+`{transitions, dorGrantedAt}`. DOR is matched on `fieldId`, not on field name,
+for the same reason `resolveStatusIds` resolves statuses by ID — a rename must
+not silently break history counting.
 
 **This weakens decision 7's case for a label counter.** Its argument was that the
 counter had to decouple from status transitions because a consented fix must not
@@ -1337,14 +1482,20 @@ recorded rather than the questions:
   look for, and there is already an open item in this document about agents
   crashing without marking anything. A wrong assignee is at least *visible*.
 
-#### Unverified — probe before building
+#### Unverified — probe before running this against anything
 
-Everything above is reasoned, not observed, and READ FIRST item 0 is the standing
-warning about exactly that.
+Everything above was reasoned, not observed, and READ FIRST item 0 is the
+standing warning about exactly that. It was built anyway, so these are no longer
+"probe before building" — they are **the gate on the first live run**, and the
+first two decide whether the budget works at all.
 
 - **Does the Jira changelog record multicheckbox changes with a usable `to` /
-  `toString`?** The whole budget reset rests on it. One tick of DOR against the
-  sandbox and one changelog GET settles it.
+  `toString`?** The whole budget reset rests on it. `getIssueHistory` matches on
+  `item.fieldId === fields.dor` and tests whether `item.toString` contains the
+  ticked value; if the real shape differs, the reset never fires and every
+  ticket's budget counts from the beginning of time. One tick of DOR against the
+  sandbox and one changelog GET settles it — and `npm run preflight` now prints
+  the DOR-grant count for the first ticket it finds, so the probe is one command.
 - **Which transition do the DOR / Story Points validators actually guard?** The
   mapping assumes To Do → In Progress. If they instead guard entry to Validation,
   gate 1 loses its hard enforcement and every To Do row needs re-checking.
@@ -1353,6 +1504,16 @@ warning about exactly that.
   transition issues perfectly well while silently failing to be assigned — which
   is this document's favourite failure shape. Nobody on the team has admin, so
   this is a request to whoever owns the scheme; bundle it with the account.
+  Preflight now checks it explicitly, against
+  `/rest/api/3/user/assignable/multiProjectSearch`.
+
+One more that only appeared once the code existed:
+
+- **Is the Acceptance Criteria field a rich-text (ADF) field or a plain-text
+  one?** `publishRefinement` sends ADF, matching the description. If the board's
+  field is a plain textarea, Jira will reject the write — loudly, which is the
+  good direction, but it is one line to change and worth knowing before the run
+  rather than during it.
 
 #### Two things the bot account does NOT change
 
@@ -1387,8 +1548,12 @@ Read this before implementing anything — several of these are subtractions.
 - ~~**`parseRefinedStory`**~~ — **DONE.** Deleted, not implemented. The watcher
   stops pretending to understand the ticket and just carries it.
 - ~~**`acceptanceCriteria` and `relevantPaths`**~~ on `ImplementWorkItem` and
-  `ReviewWorkItem` — **DONE.** Collapsed into `refinedDescription`. The
-  structured `RefinedStory` went with them; it is a string now.
+  `ReviewWorkItem` — **DONE, and `acceptanceCriteria` has since come back.**
+  `relevantPaths` and the structured `RefinedStory` are gone for good. The
+  criteria returned under decision 11 because the *board* has a field shaped
+  like a list and a workflow that gates on it — so it is a field's contents
+  travelling verbatim as text, not the `string[]` a parser produced from prose.
+  Decision 1 is intact; the story is still prose in the description.
 - ~~**`removeLabels: [labels.refine]`**~~ on the kickoff dispatch — **DONE.**
   The label survives dispatch, and a test pins that it does.
 - ~~**`packages/shared/dist/refined-story.*`**~~ — **DONE.** The whole stale
@@ -1415,28 +1580,30 @@ Read this before implementing anything — several of these are subtractions.
   rejected — decision 4. Both are the same board gesture as a success, and what
   distinguishes them belongs in the story a human reads, not in an enum nothing
   branches on.
-- **Possibly `countAttempts` and `getStatusHistory`**, if the label counter
-  (decision 7) fully replaces the changelog basis. Still open — decide
-  deliberately rather than leaving two counters. Note `statuses.changesRequested`
-  is untouched by the label deletion in decision 2; only the *label* went.
-  **Decision 11 argues for keeping both and widening them**: its edge-based count
-  removes the reason decision 7 wanted labels in the first place.
-- **Most of `PipelineStatuses`**, under decision 11 — eight of its eleven fields
-  stop being statuses and become an Assignee, a Code Reviewer, a DOR tick, or a
-  question answered by Bitbucket. Not yet done, and a subtraction large enough
-  that it should not be started before the two team questions at the end of that
-  decision come back.
+- ~~**Possibly `countAttempts` and `getStatusHistory`**, if the label counter
+  (decision 7) fully replaces the changelog basis.~~ **RESOLVED — both kept and
+  widened.** `getStatusHistory` became `getIssueHistory` and returns DOR grants
+  alongside the transitions; `countAttempts` counts the In Progress → Code
+  Review edge. Decision 7's label counter was **not** built, and decision 11
+  removed the reason it was wanted: the exemptions are positional now, so
+  nothing needs decoupling from status transitions. Do not build a second
+  counter.
+- ~~**Most of `PipelineStatuses`**, under decision 11~~ — **DONE.** Eleven
+  statuses became seven columns; the other four states became an Assignee, a
+  Code Reviewer, a DOR tick, and a question answered by Bitbucket.
+  `draftStatuses` went with them.
 
 ## Still open
 
 - **What combination of conditions makes the watcher dispatch the implementer,
   now that the findings are not on the ticket.** **Resolved for the agent path,
-  by building it:** the reviewer transitions the ticket into `Changes Requested`
-  itself, and `decide()` firing on that status alone
-  ([`pipeline.ts:342`](../packages/shared/src/pipeline.ts)) is exactly right —
+  by building it:** the reviewer moves the ticket to In Progress and releases
+  Code Reviewer, and `decide()` firing on that column alone is exactly right —
   Jira carries "the implementer's attention is needed" and nothing else, which is
   decision 9's division of labour working as intended. Nothing was added to the
-  watcher and nothing needed to be.
+  watcher and nothing needed to be. Decision 11 took one more thing off the
+  board: *which* implementer path to run is asked of Bitbucket rather than
+  asserted by a column.
 
   What is still genuinely unresolved is the human-authored and consent case from
   decision 5, which is where "the watcher polls PR comments" came from. Work out
@@ -1452,10 +1619,17 @@ Read this before implementing anything — several of these are subtractions.
   `npm ci` cycles, not one model call.
 - **Nothing marks a ticket failed when an agent crashes.** A thrown handler
   leaves the SQS message for redelivery and eventually the DLQ, but the ticket
-  stays in `Implementing` / `Refining`, where `decide()` idles it as "agent in
-  flight" forever. The lane-guard and failing-suite paths both handle themselves;
-  an unexpected throw does not. Cheapest fix is probably the watcher noticing a
+  stays assigned to the bot, where `decide()` idles it as "agent in flight"
+  forever. The lane-guard and failing-suite paths both handle themselves; an
+  unexpected throw does not. Cheapest fix is probably the watcher noticing a
   ticket that has been in flight far too long.
+
+  **Decision 11 made this both more visible and more likely to be noticed by a
+  person.** The stranded marker is now a wrong Assignee on a card rather than a
+  bookkeeping status nobody reads as anomalous — a PO looking at the board sees
+  the bot holding a ticket it is not working on. That was the argument for
+  choosing Assignee over a second label, and it is the one thing here that
+  improved without any code being written for it.
 - **Two more Bitbucket identities than the sandbox has.** The implementer pushed
   and opened its PR as the shared sandbox token, which is also the read identity
   and the reviewer identity. Decision 5 and the approval rules both assume these
@@ -1467,7 +1641,7 @@ Read this before implementing anything — several of these are subtractions.
   `approvePullRequest` returns `{status: 'refused', reason}` on a 400 or 409
   rather than throwing, the reviewer's verdict stands regardless, and the summary
   comment says out loud that Bitbucket would not record the approval and why —
-  because a PR sitting in `Awaiting Merge` with no approval on it otherwise looks
+  because a PR sitting in `Validation` with no approval on it otherwise looks
   like the reviewer forgot. Every other status still throws: a reviewer whose
   approval silently does not land is worse than one that stops.
 
@@ -1529,11 +1703,35 @@ until this is solved.
 
 ## Suggested next step
 
+**Get the board and the bot account into the shape decision 11 assumes, then
+re-prove the pipeline against it.** Nothing can run until that happens: every
+column name, the four field ids and the bot account are configured and none of
+them exist yet. In order, cheapest first:
+
+1. **The bot Atlassian account**, with `Assignable User` on the project. That is
+   a request to whoever owns the permission scheme and it is the long-lead item,
+   so start it before anything else.
+2. **The four fields and the seven columns on the sandbox board.** The KAN board
+   was built around the old eleven statuses, so this is a rebuild of it rather
+   than an edit.
+3. **`npm run preflight`.** It now checks the columns, the four field ids, the
+   bot's assignability, and prints the DOR-grant count off a real changelog —
+   which is probe 1 of decision 11 answered for the price of a command already
+   in the Makefile.
+4. **One refine run.** It is the cheapest agent and it exercises the three
+   things most likely to be wrong: the DOR read, the Story Points and
+   Acceptance Criteria writes, and the comment-then-release ordering that gate 1
+   depends on. Watch for the ticket being refined twice — that is the ordering
+   bug, and it is the one this build most deserves to be caught out on.
+
+Then the reviewer's write half, which was the pending item before decision 11
+landed and still is:
+
 **One live write run of the reviewer against KAN-6.** The reviewer is built and
 its read half is verified live, but every line of its write half — posting a
 finding, posting the summary, approving, and both transitions — has never
 executed. That is the last unexercised code on the happy path of the whole
-pipeline, and it is one run away.
+pipeline.
 
 What that run settles, none of which can be settled any other way:
 
@@ -1544,15 +1742,17 @@ What that run settles, none of which can be settled any other way:
    it is *not* refused, that is worth knowing too, because a reviewer that can
    approve its own implementer's PR makes the three-identity split look
    optional when it is not.
-2. **Whether the transitions the workflow allows include `Reviewing` →
-   `Awaiting Merge`.** `resolveStatusIds` only checks that statuses exist. The
-   refiner's and implementer's transitions are proven; these two are not.
+2. **Whether the workflow permits Code Review → Validation and Code Review → In
+   Progress.** `resolveStatusIds` only checks that statuses exist. Under
+   decision 11 no transition in the pipeline is proven — the ones that were
+   proven were between statuses that no longer exist — but these two are the
+   reviewer's, and they are the ones that gate the loop closing.
 3. **Whether an anchored comment lands where the diff index says it will.** The
    anchoring is verified for a hand-written probe; it is not yet verified for a
    finding the model aimed itself.
 
 The reviewer's own findings are the natural fixture for the next slice, because
-completing that run leaves KAN-6 in `Awaiting Merge` and closes the loop. To get
+completing that run leaves KAN-6 in `Validation` and closes the loop. To get
 the *interesting* half — a reviewer that sends work back — the cheapest route is
 a ticket whose implementation genuinely fails its own suite, not a contrived
 blocker.
@@ -1571,12 +1771,12 @@ Two things settled during the reviewer's build that this inherits:
 
 - **The reviewer does not manage the attempt counter, and nor should the
   implementer.** `countAttempts`
-  ([`pipeline.ts:136`](../packages/shared/src/pipeline.ts)) derives it by
-  counting entries into `Changes Requested` in Jira's changelog, which works no
-  matter who moved the card. The reviewer's transition *is* the increment. This
-  survives decision 2's "agents move their own cards" precisely because the
-  count is derived rather than written; if decision 7 moves it to labels, that
-  stops being true and the label swap has to ride on the watcher's dispatch.
+  ([`pipeline.ts`](../packages/shared/src/pipeline.ts)) derives it from Jira's
+  changelog, which works no matter who moved the card. Under decision 11 that is
+  the In Progress → Code Review edge, so the *implementer's* transition is the
+  increment rather than the reviewer's — the direction flipped, the property did
+  not. This survives decision 2's "agents move their own cards" precisely
+  because the count is derived rather than written.
 - **`generateObject` was not used, and the reason generalises.** This list used
   to say the reviewer is "the first agent that needs structured output" and
   should be where `AgentModel.structuredOutputs` finally gets used. It was not,
@@ -1649,9 +1849,12 @@ implementer's `rebase` path.
   ([`workspace.ts:14`](../services/agents/src/runtime/workspace.ts)). Anything
   driving an agent handler directly has to set it *before* importing the handler,
   or the run dies on `mkdtemp '/workspace/...'`.
-- **A ticket in `Refining` / `Implementing` / `Reviewing` is treated as
-  in-flight** and idles forever. That status is the watcher's own receipt, not a
-  request. Kickoff is the label on a ticket in a draft column.
+- **A ticket assigned to the bot account is treated as in-flight** and idles
+  forever, in whatever column it sits — as is one with the bot in Code Reviewer.
+  Those fields are the watcher's own receipt, not a request. Kickoff is a
+  labelled ticket in To Do with DOR unset and no pipeline comment on it.
+  (Before decision 11 this was the `Refining` / `Implementing` / `Reviewing`
+  statuses, which no longer exist.)
 - **Do not state sandbox ticket state from this file.** It goes stale within
   hours and a previous session asserted a relabelling was outstanding when the
   user had already done it. Query Jira — the dry run below prints the board and
@@ -1734,36 +1937,58 @@ This dry-run prints what the watcher *would* do against the live board. It was
 useful enough to keep, but was never promoted out of scratch — the user declined
 an `npm run dryrun` script.
 
-The lane model is confirmed end to end against real Jira, not just unit tests.
+**Updated for decision 11 and not yet run against a board that has the new
+columns.** It needs the pull request lookup now, because `decide()` reads
+mergeability off the snapshot and derives the implementer's reason from it — a
+dry run without Bitbucket would report `initial` for every ticket that has a
+pull request. That makes it a heavier script than it was; it is still read-only.
+
 Illustrative only — **query the board, do not quote this**:
 
 ```
-KAN-6   [To Do             ] labels=["agent"]  dispatch_refine   -> Refining
-KAN-6   [Refinement Review ] labels=["agent"]  idle  awaiting human refinement review
-KAN-6   [Code Review       ] labels=["agent"]  dispatch_review   -> Reviewing
+KAN-6   [To Do       ] dor=false  dispatch_refine       assignee=bot
+KAN-6   [To Do       ] dor=false  idle  gate 1: awaiting human refinement review
+KAN-6   [Code Review ] dor=true   dispatch_review       codeReviewer=bot
 ```
 
-Those are the three states the two working agents leave behind and the gate
-between them. The last one is what the implementer produced and is where the
-reviewer picks up — but the board moves, so query it.
+Note what is *not* in that output any more: a `-> NewStatus` on every line. Most
+dispatches no longer move the card, so the interesting column is the marker.
 
 ```js
 const R = '/Users/mkwon/Code/cloud-harness';
-const { loadJiraConfig, loadPipelineConfig, decide, needsHistory, countAttempts } =
+const { loadBitbucketConfig, loadJiraConfig, loadPipelineConfig, decide, needsHistory, countAttempts } =
   await import(`file://${R}/packages/shared/dist/index.js`);
 const { JiraClient } = await import(`file://${R}/services/watcher/dist/jira.js`);
+const { BitbucketReader } = await import(`file://${R}/services/watcher/dist/bitbucket.js`);
 
 const noop = { debug(){}, info(){}, warn(){}, error(){}, child(){ return noop; } };
-const jira = new JiraClient(loadJiraConfig(), loadPipelineConfig(), noop);
 const pipeline = loadPipelineConfig();
+const jira = new JiraClient(loadJiraConfig(), pipeline, noop);
+const bb = loadBitbucketConfig('read');
+const bitbucket = new BitbucketReader(bb, noop);
+const repo = { workspace: bb.workspace, slug: bb.defaultRepo, baseBranch: bb.defaultBranch };
+
 const statusIds = await jira.resolveStatusIds();
+await jira.verifyFields();
 
 for (const t of await jira.listPipelineTickets()) {
-  if (needsHistory(t.status, pipeline)) {
-    t.attempts = countAttempts(await jira.getStatusHistory(t.issueKey), statusIds);
+  const found = await bitbucket.findPullRequestForIssue(repo, t.issueKey);
+  if (found !== undefined) {
+    t.pullRequestId = found.id;
+    t.pullRequestUrl = found.url;
+    t.branch = found.branch;
+    const pr = await bitbucket.getPullRequest(repo, found.id);
+    if (pr !== undefined) t.pullRequestMergeable = pr.mergeable;
+  }
+  if (needsHistory(t, pipeline)) {
+    t.attempts = countAttempts(await jira.getIssueHistory(t.issueKey), statusIds);
   }
   const a = decide(t, pipeline);
-  console.log(t.issueKey, `[${t.status}]`, a.kind, a.kind === 'idle' ? a.reason : `-> ${a.mutation.status}`);
+  const marker = a.kind === 'idle' ? a.reason
+    : a.mutation.codeReviewer !== undefined ? 'codeReviewer=bot'
+    : a.mutation.assignee !== undefined ? `assignee=${a.mutation.assignee}` : '';
+  const moved = a.kind !== 'idle' && a.mutation.status ? ` -> ${a.mutation.status}` : '';
+  console.log(t.issueKey, `[${t.status}]`, `dor=${t.dor}`, a.kind, marker + moved);
 }
 ```
 

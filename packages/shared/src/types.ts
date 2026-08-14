@@ -96,6 +96,14 @@ export interface RefineWorkItem extends WorkItemBase {
    */
   draftDescription: string;
   /**
+   * The Acceptance Criteria field as it stands, on a second pass.
+   *
+   * Same contract as draftDescription: the refiner improves it rather than
+   * starting over, and a human may have edited it at the gate. Absent on a
+   * first pass.
+   */
+  draftAcceptanceCriteria?: string;
+  /**
    * The recent comment thread, oldest first, when the ticket is being refined
    * from a draft column in the agent lane.
    *
@@ -128,10 +136,18 @@ export interface RefineWorkItem extends WorkItemBase {
 // ---------------------------------------------------------------------------
 
 /**
- * Why the implementer is being invoked. This drives the attempt counter:
- * `changes_requested` increments it, `rebase` deliberately does not — a merge
- * conflict is not the implementer failing review, and burning a review attempt
- * on one would let unrelated churn on the base branch exhaust the budget.
+ * Why the implementer is being invoked.
+ *
+ * **Derived from Bitbucket, not asserted by a board column.** These were three
+ * separate statuses once; they are all "the implementer's turn", and the
+ * repository already knows which — no pull request means a first pass, a
+ * conflicted one means a branch refresh, anything else means a reviewer sent
+ * work back. See implementReasonFor.
+ *
+ * It does not drive the attempt counter and never did any more: the count is
+ * derived from In Progress → Code Review transitions in Jira's changelog, and a
+ * `rebase` is exempt because it never leaves Code Review rather than because
+ * anything here says so.
  */
 export type ImplementReason = 'initial' | 'changes_requested' | 'rebase';
 
@@ -140,13 +156,25 @@ export interface ImplementWorkItem extends WorkItemBase {
   reason: ImplementReason;
 
   /**
-   * The approved story — the actual spec, as prose. Acceptance criteria and the
-   * repository paths the refiner found are part of this text, not separate
-   * fields; see the note above RefineWorkItem's neighbours.
+   * The approved story — the actual spec, as prose. The repository paths the
+   * refiner found are part of this text, not separate fields; see the note
+   * above RefineWorkItem's neighbours.
    */
   refinedDescription: string;
 
-  /** 1-based. Incremented only for `changes_requested`. */
+  /**
+   * The board's Acceptance Criteria field, carried verbatim.
+   *
+   * This was deleted once, when it was a `string[]` parsed out of a structured
+   * story the watcher had to understand. It is back because the board itself
+   * has a field shaped like a list and a workflow that gates on it — so this is
+   * a field's content travelling as text, not a grammar the watcher imposes on
+   * prose. Decision 1 is intact: the *story* is still prose in the description,
+   * and criteria are the one part of it that is genuinely a list.
+   */
+  acceptanceCriteria?: string;
+
+  /** 1-based. A rebase and a consented fix do not increment it. */
   attempt: number;
   maxAttempts: number;
 
@@ -179,6 +207,13 @@ export interface ReviewWorkItem extends WorkItemBase {
 
   /** The story the implementation is meant to satisfy, as prose. */
   refinedDescription: string;
+
+  /**
+   * The board's Acceptance Criteria field. This is what the reviewer verifies
+   * against — a checklist rather than a paragraph, which is half the reason the
+   * field is worth writing at all. See ImplementWorkItem for why it is a string.
+   */
+  acceptanceCriteria?: string;
 
   branch: string;
   pullRequestUrl: string;

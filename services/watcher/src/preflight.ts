@@ -2,10 +2,11 @@
  * Pre-deployment check against real credentials.
  *
  * Answers the questions that are painful to discover from CloudWatch after an
- * apply: does the token authenticate, does the board have the eleven statuses
- * the state machine drives, can we reach the repo, does the model endpoint
- * answer. Every check runs even if an earlier one failed, because the useful
- * output is the full list of what to fix, not the first thing to break.
+ * apply: does the token authenticate, does the board have the columns and the
+ * four fields the state machine drives, can the bot actually be assigned, can
+ * we reach the repo, does the model endpoint answer. Every check runs even if
+ * an earlier one failed, because the useful output is the full list of what to
+ * fix, not the first thing to break.
  *
  * Deliberately uses the same JiraClient the watcher runs, so a green result
  * says something about the deployed code path rather than about this script.
@@ -92,8 +93,8 @@ async function jiraChecks(jiraConfig: JiraConfig, pipeline: PipelineConfig): Pro
     return `${jiraConfig.projectKey} "${project.name ?? '?'}" (id ${project.id ?? '?'})`;
   });
 
-  // The big one. Eleven statuses must exist on the board by exact name, and a
-  // mismatch is a ticket that silently never moves.
+  // The big one. Every configured column must exist on the board by exact
+  // name, and a mismatch is a ticket that silently never moves.
   try {
     const byIssueType = (await get(
       `/rest/api/3/project/${encodeURIComponent(jiraConfig.projectKey)}/statuses`,
@@ -122,6 +123,39 @@ async function jiraChecks(jiraConfig: JiraConfig, pipeline: PipelineConfig): Pro
     record('fail', 'jira: pipeline statuses', reason(err));
   }
 
+  // The quieter half, and the more dangerous one. A mistyped custom field id is
+  // not an error to Jira: it is simply absent from every response, so DOR reads
+  // as unticked forever and tickets wait at a gate a human has already passed.
+  await check('jira: pipeline fields', async () => {
+    const client = new JiraClient(jiraConfig, pipeline, log);
+    await client.verifyFields();
+    return 'all four field ids exist';
+  });
+
+  // The bot account is what marks a ticket as being worked on, and being
+  // ASSIGNABLE is a separate permission from being able to write — so the bot
+  // can edit fields and transition issues perfectly well while silently failing
+  // to be assigned, which is this project's favourite failure shape.
+  await check('jira: bot account is assignable', async () => {
+    const params = new URLSearchParams({
+      project: jiraConfig.projectKey,
+      accountId: pipeline.fields.botAccountId,
+    });
+    const assignable = (await get(
+      `/rest/api/3/user/assignable/multiProjectSearch?${params.toString()}`,
+    )) as Array<{ accountId?: string; displayName?: string }>;
+
+    const match = assignable.find((user) => user.accountId === pipeline.fields.botAccountId);
+    if (match === undefined) {
+      throw new Error(
+        `${pipeline.fields.botAccountId} cannot be assigned issues in ${jiraConfig.projectKey}. ` +
+          'Assignable User is a separate permission from write access — ask whoever owns the ' +
+          'project permission scheme to grant it, or the in-flight marker will never stick.',
+      );
+    }
+    return `${match.displayName ?? '<no name>'} can be assigned in ${jiraConfig.projectKey}`;
+  });
+
   await check('jira: JQL search + snapshot mapping', async () => {
     const client = new JiraClient(jiraConfig, pipeline, log);
     const tickets = await client.listPipelineTickets();
@@ -132,13 +166,19 @@ async function jiraChecks(jiraConfig: JiraConfig, pipeline: PipelineConfig): Pro
     return `${tickets.length} ticket(s); e.g. ${sample.issueKey} [${sample.status}] "${sample.summary.slice(0, 40)}"`;
   });
 
+  // Both halves of it. The DOR half is the newer and the less certain: the
+  // attempt budget resets on a multicheckbox change, and whether Jira records
+  // one usably is the sort of thing this project has been wrong about before.
   await check('jira: changelog readable', async () => {
     const client = new JiraClient(jiraConfig, pipeline, log);
     const tickets = await client.listPipelineTickets();
     const sample = tickets[0];
     if (sample === undefined) return 'skipped — no ticket in scope to read history from';
-    const history = await client.getStatusHistory(sample.issueKey);
-    return `${sample.issueKey}: ${history.length} status transition(s)`;
+    const history = await client.getIssueHistory(sample.issueKey);
+    return (
+      `${sample.issueKey}: ${history.transitions.length} status transition(s), ` +
+      `${history.dorGrantedAt.length} DOR grant(s)`
+    );
   });
 
   // ADF is the format the description actually arrives in; a silent failure

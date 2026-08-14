@@ -325,43 +325,94 @@ variable "jira_user_email" {
 
 variable "jira_statuses" {
   description = <<-EOT
-    Jira status names, which MUST match the board's workflow exactly —
-    transitions are resolved by name and a mismatch is a ticket that silently
-    never moves. Create these statuses in Jira first, then map them here.
+    The board's columns, which MUST match the workflow exactly — transitions are
+    resolved by name and a mismatch is a ticket that silently never moves.
 
-    Pipeline order:
-      refine label -> refining -> refinement_review -> (HUMAN) ->
-      ready_to_implement -> implementing -> code_review -> reviewing ->
-      changes_requested -> implementing -> ... -> awaiting_merge -> (HUMAN) -> done
+    These are ordinary columns rather than pipeline-specific ones, which is the
+    point: most teams cannot add columns to their own board, so the pipeline
+    fits into the seven that are already there. Status is no longer the whole
+    state — the rest of it lives on the four fields in jira_fields.
+
+      to_do        drafting, refinement, and human gate 1 (the DOR tick)
+      in_progress  the implementer's column; every attempt leaves it
+      code_review  the pull request's column: review, rebase, consented fix
+      validation   human gate 2 — post-build QA, then the merge
+      done         terminal, merged
+      blocked      terminal, the pipeline gave up and a human is needed
+      closed       terminal, won't do; recognised but never read or written
   EOT
 
   type = object({
-    refining           = string
-    refinement_review  = string
-    ready_to_implement = string
-    implementing       = string
-    code_review        = string
-    reviewing          = string
-    changes_requested  = string
-    rebase_required    = string
-    awaiting_merge     = string
-    done               = string
-    failed             = string
+    to_do       = string
+    in_progress = string
+    code_review = string
+    validation  = string
+    done        = string
+    blocked     = string
+    closed      = string
   })
 
   default = {
-    refining           = "Refining"
-    refinement_review  = "Refinement Review"
-    ready_to_implement = "Ready for Implementation"
-    implementing       = "Implementing"
-    code_review        = "Code Review"
-    reviewing          = "Reviewing"
-    changes_requested  = "Changes Requested"
-    rebase_required    = "Rebase Required"
-    awaiting_merge     = "Awaiting Merge"
-    done               = "Done"
-    failed             = "Agent Failed"
+    to_do       = "To Do"
+    in_progress = "In Progress"
+    code_review = "Code Review"
+    validation  = "Validation"
+    done        = "Done"
+    blocked     = "Blocked"
+    closed      = "Closed"
   }
+}
+
+variable "jira_bot_account_id" {
+  description = <<-EOT
+    Atlassian account id of the dedicated bot account.
+
+    This is the in-flight marker: a ticket assigned to it is being worked on by
+    an agent right now, and the Code Reviewer field pointing at it means the
+    reviewer agent is running. An account rather than a label deliberately — a
+    stranded in-flight label is invisible cruft a PO has to know to go looking
+    for, while a wrong assignee is at least visible in the field people already
+    read to find out who is working on something.
+
+    The account needs `Assignable User` in the project's permission scheme,
+    which is a SEPARATE permission from write access. Without it the bot will
+    edit fields and transition issues perfectly well while silently failing to
+    be assigned. `npm run preflight` checks for it.
+  EOT
+
+  type = string
+}
+
+variable "jira_fields" {
+  description = <<-EOT
+    Custom field ids, as `customfield_NNNNN`. Read them off
+    /rest/api/3/field on the target site.
+
+    Ids rather than names, because the changelog records a field's display name
+    as it stood at the time and the attempt budget is derived from that
+    changelog — a rename must not silently reset every ticket's budget.
+
+      code_reviewer       userpicker; the bot means the reviewer agent is running,
+                          a human means the ticket is at gate 2
+      dor                 multicheckbox; ticked means gate 1 passed and the
+                          attempt budget is granted. The board's own workflow
+                          validator requires it before In Progress, which is what
+                          makes gate 1 impossible to skip
+      dor_ticked_value    the option on that field that counts as ticked
+      story_points        number; the refiner writes it, and the workflow requires
+                          it before In Progress
+      acceptance_criteria textarea; content rather than state. The refiner writes
+                          the criteria here instead of burying them in prose, and
+                          the reviewer verifies against them
+  EOT
+
+  type = object({
+    code_reviewer       = string
+    dor                 = string
+    dor_ticked_value    = optional(string, "Yes")
+    story_points        = string
+    acceptance_criteria = string
+  })
 }
 
 variable "jira_agent_label" {
@@ -385,21 +436,6 @@ variable "jira_agent_label" {
 
   type    = string
   default = "agent"
-}
-
-variable "jira_draft_statuses" {
-  description = <<-EOT
-    Board columns a ticket is drafted in before the pipeline has touched it. A
-    labelled ticket sitting in one of these is the kickoff signal, and a story
-    sent back from refinement review returns here.
-
-    An allowlist on purpose: a real board has columns this state machine has
-    never heard of, and treating every unrecognised one as a draft would
-    re-refine anything parked in them on every tick.
-  EOT
-
-  type    = list(string)
-  default = ["Backlog", "To Do"]
 }
 
 # ---------------------------------------------------------------------------

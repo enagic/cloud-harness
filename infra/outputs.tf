@@ -95,13 +95,15 @@ output "agent_image_builds" {
 
 output "jira_workflow" {
   description = <<-EOT
-    The statuses and labels this deployment expects. These must already exist on
-    the Jira board — transitions are resolved by name.
+    The columns, label and fields this deployment expects. All of them must
+    already exist on the Jira board — statuses are resolved by name and custom
+    fields by id.
   EOT
   value = {
     statuses       = var.jira_statuses
-    draft_statuses = var.jira_draft_statuses
     agent_label    = var.jira_agent_label
+    bot_account_id = var.jira_bot_account_id
+    fields         = var.jira_fields
   }
 }
 

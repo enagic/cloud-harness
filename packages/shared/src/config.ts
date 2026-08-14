@@ -61,32 +61,40 @@ export function loadJiraConfig(): JiraConfig {
 }
 
 /**
- * Status and label names must match the Jira board exactly. They are supplied
- * as env vars rather than hardcoded so the pipeline can be pointed at a board
- * whose workflow is already named something else.
+ * Column names, the lane label, and the four board fields the state machine
+ * reads. All supplied as env vars rather than hardcoded so the pipeline can be
+ * pointed at a board whose workflow is already named something else — which is
+ * the normal case, since most teams cannot add columns to their own board.
+ *
+ * Statuses are matched by NAME because that is what a Jira transition resolves
+ * by. Custom fields are configured by ID (`customfield_10050`) because the
+ * changelog records a field's display name as it was at the time, and the
+ * attempt budget is derived from that changelog.
  */
 export function loadPipelineConfig(): PipelineConfig {
   return {
     statuses: {
-      refining: requireEnv('STATUS_REFINING'),
-      refinementReview: requireEnv('STATUS_REFINEMENT_REVIEW'),
-      readyToImplement: requireEnv('STATUS_READY_TO_IMPLEMENT'),
-      implementing: requireEnv('STATUS_IMPLEMENTING'),
+      toDo: requireEnv('STATUS_TO_DO'),
+      inProgress: requireEnv('STATUS_IN_PROGRESS'),
       codeReview: requireEnv('STATUS_CODE_REVIEW'),
-      reviewing: requireEnv('STATUS_REVIEWING'),
-      changesRequested: requireEnv('STATUS_CHANGES_REQUESTED'),
-      rebaseRequired: requireEnv('STATUS_REBASE_REQUIRED'),
-      awaitingMerge: requireEnv('STATUS_AWAITING_MERGE'),
+      validation: requireEnv('STATUS_VALIDATION'),
       done: requireEnv('STATUS_DONE'),
-      failed: requireEnv('STATUS_FAILED'),
+      blocked: requireEnv('STATUS_BLOCKED'),
+      closed: requireEnv('STATUS_CLOSED'),
     },
     labels: {
       agentLane: requireEnv('LABEL_AGENT'),
     },
-    draftStatuses: requireEnv('STATUS_DRAFT')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean),
+    fields: {
+      botAccountId: requireEnv('JIRA_BOT_ACCOUNT_ID'),
+      codeReviewer: requireEnv('FIELD_CODE_REVIEWER'),
+      dor: requireEnv('FIELD_DOR'),
+      // The board's sole option on that field today. Configurable because it is
+      // an option name, and option names get edited.
+      dorTickedValue: optionalEnv('FIELD_DOR_TICKED_VALUE') ?? 'Yes',
+      storyPoints: requireEnv('FIELD_STORY_POINTS'),
+      acceptanceCriteria: requireEnv('FIELD_ACCEPTANCE_CRITERIA'),
+    },
     maxAttempts: intEnv('MAX_IMPLEMENTATION_ATTEMPTS', 3),
   };
 }
