@@ -11,7 +11,7 @@ describe('adfToText', () => {
     assert.equal(adfToText({ type: 'doc', version: 1, content: [] }), '');
   });
 
-  it('flattens paragraphs and headings', () => {
+  it('flattens paragraphs and headings to markdown', () => {
     const doc = {
       type: 'doc',
       version: 1,
@@ -72,16 +72,20 @@ describe('adfToText', () => {
       type: 'doc',
       version: 1,
       content: [
-        { type: 'panel', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'hi' }] }] },
+        { type: 'paragraph', content: [{ type: 'text', text: 'before' }] },
         { type: 'someFutureThing', text: 'fallback' },
       ],
     };
-    assert.equal(adfToText(doc), 'hi\n\nfallback');
+    // Nodes the library has no converter for round-trip as a commented JSON
+    // blob rather than being dropped or throwing — noisy, but recoverable.
+    const text = adfToText(doc);
+    assert.match(text, /^before/);
+    assert.match(text, /someFutureThing/);
   });
 });
 
 describe('textToAdf', () => {
-  it('splits on blank lines and drops empty paragraphs', () => {
+  it('splits on blank lines into separate paragraphs', () => {
     const doc = textToAdf('one\n\n\n\ntwo');
     assert.equal(doc.content.length, 2);
     assert.equal(doc.content[0]?.content?.[0]?.text, 'one');
@@ -106,16 +110,14 @@ describe('textToAdf', () => {
     const doc = textToAdf('```\nnot a language tag here\n```');
     const block = doc.content[0];
     assert.equal(block?.type, 'codeBlock');
-    assert.equal(block?.attrs, undefined);
+    assert.equal(block?.attrs?.['language'], undefined);
     assert.equal(block?.content?.[0]?.text, 'not a language tag here');
   });
 });
 
 describe('round trip', () => {
-  // Nothing parses the description any more — the refined story is prose. What
-  // still has to survive byte-exact is quoted code: the refiner points the
-  // implementer at real code from the repository, and whitespace inside a fence
-  // is load-bearing in a way prose around it is not.
+  // The refined story is prose that quotes real code from the repository, and
+  // whitespace inside a fence is load-bearing in a way prose around it is not.
   it('preserves a fenced code payload exactly', () => {
     const payload = [
       'export function rateLimit(req: Request): boolean {',
@@ -140,5 +142,11 @@ describe('round trip', () => {
     assert.match(recovered, /^intro/);
     assert.match(recovered, /outro$/);
     assert.match(recovered, /```json\n\{"k":"v"\}\n```/);
+  });
+
+  it('preserves bold, italic and inline code marks', () => {
+    const original = '**bold** and *italic* and `code`';
+    const recovered = adfToText(textToAdf(original));
+    assert.equal(recovered, original);
   });
 });
