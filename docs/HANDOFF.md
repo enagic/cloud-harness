@@ -32,6 +32,17 @@ PR-comment read path that has since been built. Decision 9 **reverses** the
 direction an earlier session was leaning — that reasoning is preserved in the
 decision so it is not re-derived.
 
+**Decision 11 was added 2026-08-14 and is the largest pending change to the state
+machine.** Production has seven board columns against `PipelineStatuses`' eleven,
+and no admin rights to add more, so status stops being the whole state and splits
+across the column, Assignee, Code Reviewer, DOR and Story Points. Nothing is
+implemented. Both team questions it was blocked on came back the same day and
+both **shrank** the design: Validation is post-build QA with required-field
+validators in front of it, which pushed gate 1 into To Do and let the board
+enforce it; and a dedicated bot Atlassian account settles the in-flight marker.
+What remains is three probes, not decisions. Read it before touching
+`pipeline.ts`; it subtracts more than it adds.
+
 ## READ FIRST
 
 **0. Check what an endpoint does before designing around what it should do.**
@@ -1133,6 +1144,242 @@ the oldest exchanges are the settled ones.
 This is also what the refiner already does. `conversation` arrives *on the work
 item*; it is not fetched.
 
+### 11. Seven columns, four fields — the production board mapping
+
+**Not implemented. Designed against the real production board, 2026-08-14.**
+
+`PipelineStatuses` has eleven statuses plus a draft allowlist. Production has
+seven columns and no admin rights to add more:
+
+> To Do · In Progress · Code Review · Blocked · Validation · Done · Closed
+
+Two of those are terminal, so eleven states have to fit in five working columns.
+They do — but only by giving up the assumption baked into
+[`pipeline.ts:25`](../packages/shared/src/pipeline.ts), which is that status is
+the *whole* state. It is not, and it was never a good fit: half of those statuses
+are the watcher's bookkeeping wearing a board column, which is the same
+complaint the old "agent-in-flight as status" open question was making.
+
+**Split the one axis apart, onto fields that already mean what we need them to
+mean.** Nothing here is repurposed against its grain; that is the whole test this
+design had to pass.
+
+| Axis | Field | Meaning |
+|---|---|---|
+| Stage | Column | What kind of work this is |
+| Who holds the code | Assignee (standard) | The bot account = an agent is executing |
+| Who holds the review | Code Reviewer (`…customfieldtypes:userpicker`) | Bot = reviewer agent running; a human = gate 2 |
+| Gate 1 passed | DOR (`…customtypes:multicheckboxes`, sole value `Yes`) | Story approved, attempt budget granted |
+| *(not an axis — a gate)* | Story Points | Required by the workflow before In Progress; written by the refiner |
+
+Plus Bitbucket, which the watcher already polls and which costs nothing extra:
+PR exists / mergeable / merged / declined.
+
+**The board enforces gate 1 by itself, and this is the most useful fact here.**
+Production has workflow validators requiring **DOR** *and* **Story Points**
+before a ticket may proceed into In Progress. An unrefined story therefore
+*cannot physically enter* In Progress — a hard guarantee no amount of pipeline
+code could provide, and it is what pins down where the early states live. Two
+consequences fall straight out:
+
+- **Refinement happens in To Do**, not In Progress. It could not be otherwise:
+  DOR is unset while the refiner is running, so the transition would be rejected.
+- **Gate 1 lives in To Do too**, and needs no column of its own.
+
+**Story Points is the fourth field, and the refiner should write it.** The
+workflow demands it before In Progress, so otherwise a human hand-enters a number
+at every single gate 1. Decision 4 already has the refiner producing a *size*;
+this puts it in the field the board actually requires instead of leaving it in
+prose. If the team would rather point their own stories, the human sets points
+and ticks DOR in one gesture at gate 1 and nothing else changes.
+
+#### The mapping
+
+`bot` = the dedicated bot Atlassian account. `—` = anything that is not the bot.
+
+| Pipeline state | Column | Assignee | Code Reviewer | DOR | PR / other |
+|---|---|---|---|---|---|
+| draft → dispatch refine | To Do | — | — | unset | no pipeline comment yet |
+| refining (in flight) | To Do | **bot** | — | unset | none |
+| **gate 1 (wait)** | To Do | — | — | unset | pipeline commented, nothing newer |
+| **send-back → dispatch refine** | To Do | — | — | unset | **human comment newer than pipeline's last** |
+| approved → dispatch implement | To Do | — | — | **Yes** | none |
+| implementing (in flight) | In Progress | **bot** | — | Yes | — |
+| changes requested → dispatch implement | In Progress | — | — | Yes | open |
+| PR up → dispatch review | Code Review | — | — | Yes | mergeable |
+| reviewing (in flight) | Code Review | — | **bot** | Yes | — |
+| rebase → dispatch implement | Code Review | — | — | Yes | **conflicted** |
+| rebasing (in flight) | Code Review | **bot** | — | Yes | — |
+| **gate 2 (wait)** | Validation | — | human | Yes | open |
+| done | Done | | | | merged |
+| failed | Blocked | | | | |
+| won't do | Closed | | | | *never read, never written* |
+
+Every row has a distinct signature. Four things carry it:
+
+**`ImplementReason` stops being three statuses and gets derived from Bitbucket.**
+`initial` / `changes_requested` / `rebase` are all "In Progress, implementer's
+turn," and Bitbucket already knows which: no PR → initial, conflicted → rebase,
+otherwise → changes_requested. Three columns collapse for free, and the reason
+now comes from the repository's actual state instead of being asserted by a
+column somebody can drag. This is decision 9's division of labour again — Jira
+carries "whose attention is needed", Bitbucket carries what is true about the
+code.
+
+**A rebase never leaves Code Review.** It is not a new implementation attempt, it
+is a branch refresh, and the ticket genuinely *is* still in code review — so the
+implementer runs with the card parked there, marked by Assignee. Reviewer-in-
+flight is marked by Code Reviewer. Two fields for two roles, which is what those
+fields are for, and it is what lets one column hold four states without
+ambiguity.
+
+**The two human gates are not symmetrical, and forcing them to be was the first
+version's mistake.** An earlier draft of this decision put *both* gates in
+Validation, discriminated by DOR. That is wrong: **Validation is post-build QA on
+this board**, and the workflow validators make it unreachable for an unrefined
+story anyway. Gate 2 belongs there and reads exactly right — the reviewer
+approved, a human validates and merges. Gate 1 has no business in a QA column and
+does not need one, because the DOR tick *is* the gate. It waits in To Do.
+
+**Gate 1's send-back is a comment, and that is decision 4 already working.** With
+both gate-1 states in To Do there is no column move to distinguish "never
+refined" from "refined, awaiting approval" — so use the thread. The refiner
+leaves its open questions in a comment, the human answers in a comment, and
+`RefineWorkItem.conversation` already carries that exchange; decision 4's
+signature rule already tells the two authors apart. A human comment newer than
+the pipeline's last one is the send-back signal, and no comment at all from the
+pipeline means the ticket has never been refined.
+
+The cost, stated plainly because it is a behaviour a PO has to know: **commenting
+on a gate-1 ticket in the agent lane re-triggers refinement**, even when the
+comment was only an aside. It is cheap and it is idempotent — a second pass
+improves the story with the whole thread in hand, which is what decision 4 built
+it to do — but it is surprising the first time. If that proves annoying in
+practice the fallback is to require the comment to mention the bot, not to invent
+a new field.
+
+#### The attempt budget survives, and it is still derived
+
+This is the load-bearing part. Decision 7 and
+[`countAttempts`](../packages/shared/src/pipeline.ts) both rest on the budget
+living somewhere a human cannot quietly rewrite. That property is kept:
+
+- **Reset** = the last `DOR → Yes` in the changelog. Jira records custom field
+  changes with author and timestamp exactly as it records status changes.
+- **Attempts** = the count of **In Progress → Code Review** transitions since
+  that reset.
+
+**Count the edge, not the destination.** A genuine attempt always arrives from In
+Progress. Anything that never leaves Code Review cannot be counted, and that one
+rule now covers both exemptions rather than one: the rebase, and — decision 5 —
+the consented fix, which should park in Code Review for exactly the same reason.
+That retires the open question about whether a consented fix needs its own
+`ImplementReason` or a flag. It needs neither; it needs to not move.
+
+The gate-2 rebase arrives from Validation → Code Review, so it is excluded by the
+same edge rule. Still structural, still no conditional for a future change to
+break.
+
+`getStatusHistory`
+([`jira.ts:248`](../services/watcher/src/jira.ts)) already pages the entire
+changelog and discards everything where `field !== 'status'`. Widen that filter;
+the paging is unchanged. Resolve DOR by `fieldId`, not by field name, for the
+same reason `resolveStatusIds` resolves statuses by ID — a rename must not
+silently break history counting.
+
+**This weakens decision 7's case for a label counter.** Its argument was that the
+counter had to decouple from status transitions because a consented fix must not
+consume an attempt; the edge rule handles that structurally, without new storage
+and without a second counter to keep honest. Decide deliberately rather than
+building both — but the changelog basis now looks like the one to keep.
+
+#### Acceptance Criteria is content, not state
+
+Do not press the fourth field into carrying a bit. It is a textarea and it should
+hold acceptance criteria: the refiner writes them there instead of burying them
+in prose, and the reviewer verifies against them. Two real wins — gate 1 becomes
+a concrete read for the human, and the reviewer gets a checklist instead of a
+paragraph. This does not contradict decision 1: the *story* stays prose in the
+description. Criteria are the one part of it that is genuinely a list, and the
+board already has a field shaped like one.
+
+Cheap guard worth having: refuse to dispatch the implementer when DOR is `Yes`
+but Acceptance Criteria is empty. That catches a DOR ticked on an unrefined
+ticket, which is the one way gate 1 can be skipped by accident.
+
+#### What this simplifies on the way past
+
+`listPipelineTickets`
+([`jira.ts:150`](../services/watcher/src/jira.ts)) filters
+`status IN (…) OR labels = agentLane`. With generic columns that status list
+becomes the whole board, so drop it — `decide()` already idles anything without
+the lane label before reading anything else, so `labels = "<agentLane>"` alone is
+both correct and narrower than what ships today.
+
+Note also that `needsHistory` widens: the changelog is now needed for tickets in
+Code Review and for In Progress tickets that have a PR. More per-ticket calls
+than the current three statuses, still far from every ticket.
+
+#### The two team questions, both now answered
+
+Both came back on 2026-08-14 and both changed the design, so the answers are
+recorded rather than the questions:
+
+- **"Is Validation post-build QA?" — yes**, and there is no way to fast-forward a
+  non-refined story into it. Story Points and DOR are required-field validators
+  before a ticket may proceed in the workflow. This is what moved gate 1 into To
+  Do, pinned refinement to To Do, and turned Story Points into the fourth field
+  the refiner writes. It made the design smaller, not larger.
+- **"Does anything key on Assignee?" — resolved by a dedicated bot Atlassian
+  account**, being signed up for rather than reusing the shared one. A second
+  label was considered for in-flight marking and rejected: labels are free of
+  admin cost, but a stranded in-flight label is invisible cruft a PO must know to
+  look for, and there is already an open item in this document about agents
+  crashing without marking anything. A wrong assignee is at least *visible*.
+
+#### Unverified — probe before building
+
+Everything above is reasoned, not observed, and READ FIRST item 0 is the standing
+warning about exactly that.
+
+- **Does the Jira changelog record multicheckbox changes with a usable `to` /
+  `toString`?** The whole budget reset rests on it. One tick of DOR against the
+  sandbox and one changelog GET settles it.
+- **Which transition do the DOR / Story Points validators actually guard?** The
+  mapping assumes To Do → In Progress. If they instead guard entry to Validation,
+  gate 1 loses its hard enforcement and every To Do row needs re-checking.
+- **The bot account needs `Assignable User` in the project's permission scheme.**
+  It is a *separate* permission from write access, so the bot will edit fields and
+  transition issues perfectly well while silently failing to be assigned — which
+  is this document's favourite failure shape. Nobody on the team has admin, so
+  this is a request to whoever owns the scheme; bundle it with the account.
+
+#### Two things the bot account does NOT change
+
+- **Comment authorship stays on the signature, not the account.** Decision 4
+  deleted `selfAccountId` because the pipeline's account was also a person's, and
+  a distinct account now makes an accountId check *look* safe. It is not: every
+  agent comment written to date was authored under the **old shared account**, so
+  an accountId check against the new bot classifies all of them as human — which
+  is exactly decision 4's failure, a second pass receiving answers with the
+  questions stripped out. Leave it alone.
+- **Bitbucket still needs two writer identities.** The implementer and reviewer
+  must remain distinct accounts ([`config.ts:213`](../packages/shared/src/config.ts))
+  because Bitbucket does not count a pull request author's own approval. One Jira
+  bot does not satisfy that; see the still-open item on the three collapsed
+  sandbox identities. Decide how many Atlassian accounts this needs in total
+  before signing up for them piecemeal.
+
+#### If a constraint moves again
+
+The four fields are sufficient as things stand. If one is withdrawn, the useful
+things to go looking for, in order: any existing **single-select or radio** custom
+field (even with unrelated option names — it could carry the whole agent
+sub-state and free Assignee entirely); **Flagged** (`multicheckboxes`, option
+`Impediment`), standard on most Jira Software boards and the natural marker for
+Blocked; a second userpicker such as **QA / Tester**, which commonly sits
+alongside Code Reviewer.
+
 ## What these decisions delete
 
 Read this before implementing anything — several of these are subtractions.
@@ -1172,6 +1419,13 @@ Read this before implementing anything — several of these are subtractions.
   (decision 7) fully replaces the changelog basis. Still open — decide
   deliberately rather than leaving two counters. Note `statuses.changesRequested`
   is untouched by the label deletion in decision 2; only the *label* went.
+  **Decision 11 argues for keeping both and widening them**: its edge-based count
+  removes the reason decision 7 wanted labels in the first place.
+- **Most of `PipelineStatuses`**, under decision 11 — eight of its eleven fields
+  stop being statuses and become an Assignee, a Code Reviewer, a DOR tick, or a
+  question answered by Bitbucket. Not yet done, and a subtraction large enough
+  that it should not be started before the two team questions at the end of that
+  decision come back.
 
 ## Still open
 
@@ -1225,13 +1479,16 @@ Read this before implementing anything — several of these are subtractions.
 - **Does the refiner create child tickets when it recommends a split, or only
   propose the breakdown in a comment?** It has no Jira issue-creation path
   today, and this is a write-permission question as much as a workflow one.
-- **Whether a consented fix gets its own `ImplementReason` or reuses
-  `changes_requested`** with a flag. Leaning toward its own, since it must not
-  consume an attempt.
-- **Whether agent-in-flight should stay a status or become a label.** The
-  `Refining` / `Implementing` / `Reviewing` statuses are the watcher's
-  bookkeeping, and they put machine-internal states on a human's board. Not
-  urgent; noted because "zero collision" is the goal.
+- ~~**Whether a consented fix gets its own `ImplementReason` or reuses
+  `changes_requested`** with a flag.~~ **Answered by decision 11, if that lands:**
+  neither. A consented fix stays in Code Review the way a rebase does, and the
+  edge-based counter cannot see it. The exemption becomes positional rather than
+  a reason or a flag.
+- ~~**Whether agent-in-flight should stay a status or become a label.**~~
+  **Answered by decision 11, if that lands:** neither — it becomes the Assignee
+  (implementer, refiner) or the Code Reviewer (reviewer). A label would still be
+  machine bookkeeping on a human's board; an assignee is the board's own way of
+  saying who is working on something, and it is the field people already read.
 
 ## Needs verifying against the sandbox
 
